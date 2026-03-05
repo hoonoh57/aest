@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+core.py — 불변 로직
+  - ServerClient (server32 API)
+  - Standard SuperTrend
+  - AEST 계산 엔진 (필터 주입 방식)
+  - HTML 차트 생성
+"""
+
+import json
+import numpy as np
+import pandas as pd
+import requests
+from datetime import datetime, timedelta
+
+
+# ═══════════════════════════════════════════════════════════════
+#  서버 클라이언트  (server32 매뉴얼 준수)
+# ═══════════════════════════════════════════════════════════════
+class ServerClient:
+    """
+    server32 REST API
+    응답: { "Success": bool, "Message": str, "Data": ... }
+    """
+
+    def __init__(self, host="localhost", port=8082):
+        self.base = f"http://{host}:{port}"
+
+    def _get(self, path, params=None):
+        r = requests.get(f"{self.base}{path}", params=params, timeout=30)
+        r.raise_for_status()
+        js = r.json()
+        if not js.get("Success"):
+            raise RuntimeError(f"API: {js.get('Message', 'unknown')}")
+        return js["Data"]
+
+    def symbol_name(self, code):
+        try:
+            return self._get("/api/market/symbol", {"code": code}).get("name", code)
+        except Exception:
+            return code
+
+    def daily_candles(self, code, years=5):
+        now = datetime.now()
+        data = self._get("/api/market/candles/daily", {
+            "code": code,
+            "date": now.strftime("%Y%m%d"),
+            "stopDate": (now - timedelta(days=365 * years)).strftime("%Y%m%d"),
+        })
+        if not data:
+            raise RuntimeError("일봉 데이터 없음")
+        rows = []
+        for d in data:
+            rows.append({
+                "date":   pd.to_datetime(str(d["일자"])),
+                "open":   abs(int(d["시가"])),
+                "high":   abs(int(d["고가"])),
+                "low":    abs(int(d["저가"])),
+                "close":  abs(int(d.get("현재가", d.get("종가", 0)))),
+                "volume": abs(int(d["거래량"])),
+            })
+        df = pd.DataFrame(rows).sort_values("date").set_index("date")
+        df = df[df["volume"] > 0]
+        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        return df
+
+    def minute_candles(self, code, tick=1):
+        stop = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d") + "090000"
+        data = self._get("/api/market/candles/minute", {
+            "code": code, "tick": tick, "stopTime": stop,
+        })
+        if not data:
+            raise RuntimeError("분봉 데이터 없음")
+        rows = []
+        for d in data:
+            rows.append({
+                "date":   pd.to_datetime(str(d["체결시간"])),
+                "open":   abs(int(d["시가"])),
+                "high":   abs(int(d["고가"])),
+                "low":    abs(int(d["저가"])),
+                "close":  abs(int(d["현재가"])),
+                "volume": abs(int(d["거래량"])),
+            })
+        df = pd.DataFrame(rows).sort_values("date").set_index("date")
+        df = df[df["volume"] > 0]
+        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        return df
+
+    def minute_candles_from(self, code, tick=1, from_date=""):
+        """
+        분봉: 특정 일자 ~ 현재
+        from_date: "YYYY-MM-DD" or "YYYYMMDD"
+        stopTime = from_date 09:00:00
+        """
+        if not from_date:
+            return self.minute_candles(code, tick)
+
+        d = from_date.replace("-", "")
+        stop = d + "090000"
+
+        print(f"  API: /api/market/candles/minute?code={code}&tick={tick}&stopTime={stop}")
+        data = self._get("/api/market/candles/minute", {
+            "code": code, "tick": tick, "stopTime": stop,
+        })
+        if not data:
+            raise RuntimeError("분봉 데이터 없음")
+        rows = []
+        for d in data:
+            rows.append({
+                "date":   pd.to_datetime(str(d["체결시간"])),
+                "open":   abs(int(d["시가"])),
+                "high":   abs(int(d["고가"])),
+                "low":    abs(int(d["저가"])),
+                "close":  abs(int(d["현재가"])),
+                "volume": abs(int(d["거래량"])),
+            })
+        df = pd.DataFrame(rows).sort_values("date").set_index("date")
+        df = df[df["volume"] > 0]
+        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        return df
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Standard SuperTrend
+# ═══════════════════════════════════════════════════════════════
+def compute_supertrend(df, atr_len=14, mult=3.0):
+    h, l, c = df["high"].values.astype(float), df["low"].values.astype(float), df["close"].values.astype(float)
+    n = len(df)
+
+    tr = np.zeros(n)
+    tr[0] = h[0] - l[0]
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+
+    atr = np.full(n, np.nan)
+    atr[atr_len - 1] = np.mean(tr[:atr_len])
+    for i in range(atr_len, n):
+        atr[i] = (atr[i-1] * (atr_len - 1) + tr[i]) / atr_len
+
+    mid = (h + l) / 2.0
+    upper, lower = mid + mult * atr, mid - mult * atr
+    trend = np.ones(n)
+    st_line = np.full(n, np.nan)
+
+    for i in range(1, n):
+        if np.isnan(atr[i]):
+            continue
+        if lower[i] < lower[i-1] and c[i-1] > lower[i-1]:
+            lower[i] = lower[i-1]
+        if upper[i] > upper[i-1] and c[i-1] < upper[i-1]:
+            upper[i] = upper[i-1]
+        if trend[i-1] == 1:
+            trend[i] = -1 if c[i] < lower[i] else 1
+        else:
+            trend[i] = 1 if c[i] > upper[i] else -1
+        st_line[i] = lower[i] if trend[i] == 1 else upper[i]
+
+    df["st_line"] = st_line
+    df["st_trend"] = trend
+    return df
+
+
+# ═══════════════════════════════════════════════════════════════
+#  AEST 엔진 (횡보 필터 주입 방식)
+# ═══════════════════════════════════════════════════════════════
+def compute_aest(df, atr_len=14, mult=3.0, range_filter_func=None):
+    """
+    Adaptive SuperTrend — 횡보 필터 기반
+    range_filter_func(df) → bool 배열 (True=횡보, False=추세)
+    횡보 구간에서는 ST 전환을 차단
+    """
+    h, l, c = df["high"].values.astype(float), df["low"].values.astype(float), df["close"].values.astype(float)
+    n = len(df)
+
+    # EATR
+    tr = np.zeros(n)
+    tr[0] = h[0] - l[0]
+    for i in range(1, n):
+        tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
+    alpha = 2.0 / (atr_len + 1)
+    eatr = np.zeros(n)
+    eatr[0] = tr[0]
+    for i in range(1, n):
+        eatr[i] = alpha * tr[i] + (1 - alpha) * eatr[i-1]
+
+    mid = (h + l) / 2.0
+    upper, lower = mid + mult * eatr, mid - mult * eatr
+
+    # 횡보 판정
+    if range_filter_func is not None:
+        is_range = range_filter_func(df)
+    else:
+        is_range = np.zeros(n, dtype=bool)
+
+    trend = np.ones(n)
+    aest_line = np.full(n, np.nan)
+
+    for i in range(1, n):
+        if np.isnan(eatr[i]):
+            continue
+
+        # Lock bands
+        if lower[i] < lower[i-1] and c[i-1] > lower[i-1]:
+            lower[i] = lower[i-1]
+        if upper[i] > upper[i-1] and c[i-1] < upper[i-1]:
+            upper[i] = upper[i-1]
+
+        # 추세 결정
+        if is_range[i]:
+            # 횡보 → 전환 차단
+            trend[i] = trend[i-1]
+        else:
+            # 추세 → 정상 판단
+            if trend[i-1] == 1:
+                trend[i] = -1 if c[i] < lower[i] else 1
+            else:
+                trend[i] = 1 if c[i] > upper[i] else -1
+
+        aest_line[i] = lower[i] if trend[i] == 1 else upper[i]
+
+    df["aest_line"] = aest_line
+    df["aest_trend"] = trend
+    df["aest_is_range"] = is_range
+    return df
+
+
+# ═══════════════════════════════════════════════════════════════
+#  HTML 차트 생성 (lightweight-charts)
+# ═══════════════════════════════════════════════════════════════
+def build_html(df, code, name, tf_label, filter_name, filter_list,
+               tf_options, current_tf, current_date=""):
+    """lightweight-charts HTML — 문자열 결합 방식 (f-string 충돌 원천 차단)"""
+
+    # ── 1) 시간 컬럼 ──
+    df = df.copy()
+    if isinstance(df.index, pd.DatetimeIndex):
+        if current_tf == "D":
+            df["time"] = df.index.strftime("%Y-%m-%d")
+        else:
+            df["time"] = (df.index.astype(np.int64) // 10**9).astype(int)
+    else:
+        df["time"] = df.index.astype(str)
+
+    # ── 2) 캔들 ──
+    candles = []
+    for _, r in df.iterrows():
+        candles.append({"time": r["time"], "open": float(r["open"]),
+                        "high": float(r["high"]), "low": float(r["low"]),
+                        "close": float(r["close"])})
+
+    # ── 3) 볼륨 ──
+    volumes = []
+    for _, r in df.iterrows():
+        clr = "rgba(38,166,154,0.5)" if r["close"] >= r["open"] else "rgba(239,83,80,0.5)"
+        volumes.append({"time": r["time"], "value": float(r["volume"]), "color": clr})
+
+    # ── 4) ST 라인 ──
+    st_data = []
+    if "st_line" in df.columns:
+        for _, r in df.iterrows():
+            v = r["st_line"]
+            if pd.notna(v):
+                st_data.append({"time": r["time"], "value": float(v)})
+
+    # ── 5) AEST 라인 ──
+    aest_data = []
+    if "aest_line" in df.columns:
+        for _, r in df.iterrows():
+            v = r["aest_line"]
+            if pd.notna(v):
+                clr = "#26a69a" if r.get("aest_trend", 0) == 1 else "#ef5350"
+                aest_data.append({"time": r["time"], "value": float(v), "color": clr})
+
+    # ── 6) 레인지 마커 ──
+    range_marks = []
+    if "aest_is_range" in df.columns:
+        for _, r in df.iterrows():
+            if r["aest_is_range"]:
+                range_marks.append({"time": r["time"], "value": float(r["low"]),
+                                    "color": "rgba(255,235,59,0.15)"})
+
+    # ── 7) 전환 마커 ──
+    markers = []
+    if "aest_trend" in df.columns:
+        tv = df["aest_trend"].values
+        for i in range(1, len(df)):
+            if tv[i] != tv[i-1] and tv[i] != 0:
+                row = df.iloc[i]
+                if tv[i] == 1:
+                    markers.append({"time": row["time"], "position": "belowBar",
+                                    "color": "#26a69a", "shape": "arrowUp", "text": "UP"})
+                else:
+                    markers.append({"time": row["time"], "position": "aboveBar",
+                                    "color": "#ef5350", "shape": "arrowDown", "text": "DN"})
+
+    # ── 8) 통계 ──
+    st_flips = 0
+    if "st_trend" in df.columns:
+        st_t = df["st_trend"].values
+        for i in range(1, len(st_t)):
+            if st_t[i] != st_t[i-1] and st_t[i] != 0:
+                st_flips += 1
+    aest_flips = 0
+    if "aest_trend" in df.columns:
+        at = df["aest_trend"].values
+        for i in range(1, len(at)):
+            if at[i] != at[i-1] and at[i] != 0:
+                aest_flips += 1
+    reduction = round((1 - aest_flips / max(st_flips, 1)) * 100, 1)
+    range_bars = int(df["aest_is_range"].sum()) if "aest_is_range" in df.columns else 0
+    range_pct = round(range_bars / max(len(df), 1) * 100, 1)
+
+    last = df.iloc[-1]
+    last_close = float(last["close"])
+    last_aest = float(last["aest_line"]) if "aest_line" in df.columns and pd.notna(last.get("aest_line")) else 0
+    last_trend_val = last.get("aest_trend", 0)
+    last_trend_str = "▲ 상승" if last_trend_val == 1 else "▼ 하락"
+    trend_clr = "#26a69a" if last_trend_val == 1 else "#ef5350"
+
+    # ── 9) JSON ──
+    candles_json = json.dumps(candles, ensure_ascii=False)
+    volumes_json = json.dumps(volumes, ensure_ascii=False)
+    st_json = json.dumps(st_data, ensure_ascii=False)
+    aest_json = json.dumps(aest_data, ensure_ascii=False)
+    markers_json = json.dumps(markers, ensure_ascii=False)
+
+    # ── 10) 옵션 HTML ──
+    tf_opts = ""
+    for t in tf_options:
+        sel = " selected" if t == current_tf else ""
+        tf_opts += '<option value="' + t + '"' + sel + '>' + t + '</option>'
+
+    filter_opts = ""
+    for f in filter_list:
+        sel = " selected" if f == filter_name else ""
+        filter_opts += '<option value="' + f + '"' + sel + '>' + f + '</option>'
+
+    date_val = current_date if current_date else ""
+    date_dis = " disabled" if current_tf == "D" else ""
+
+    # ── 디버그 ──
+    print("  [HTML] candles=" + str(len(candles)) + " st=" + str(len(st_data))
+          + " aest=" + str(len(aest_data)) + " markers=" + str(len(markers))
+          + " range=" + str(len(range_marks))
+          + " date_ctrl='" + date_val + "' disabled=" + str(current_tf == "D"))
+
+    # ═══════════════════════════════════════════════════════════
+    #  HTML 조립 (문자열 결합 — f-string 사용 안함)
+    # ═══════════════════════════════════════════════════════════
+    h = []
+    h.append('<!DOCTYPE html>')
+    h.append('<html lang="ko">')
+    h.append('<head>')
+    h.append('<meta charset="UTF-8">')
+    h.append('<title>AEST — ' + code + ' ' + name + ' [' + tf_label + ']</title>')
+    h.append('''<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#131722; color:#d1d4dc; font-family:'Segoe UI',sans-serif; }
+#toolbar {
+  display:flex; align-items:center; gap:8px;
+  padding:8px 16px; background:#1e222d; border-bottom:1px solid #2a2e39;
+  flex-wrap:wrap;
+}
+#toolbar label { color:#787b86; font-size:12px; margin-left:6px; }
+#toolbar input[type="text"] {
+  width:90px; padding:4px 8px; background:#2a2e39; border:1px solid #363a45;
+  color:#d1d4dc; border-radius:4px; font-size:13px;
+}
+#toolbar input[type="date"] {
+  padding:4px 8px; background:#2a2e39; border:1px solid #363a45;
+  color:#d1d4dc; border-radius:4px; font-size:13px; min-width:140px;
+}
+#toolbar input[type="date"]:disabled { opacity:0.4; cursor:not-allowed; }
+#toolbar select {
+  padding:4px 8px; background:#2a2e39; border:1px solid #363a45;
+  color:#d1d4dc; border-radius:4px; font-size:13px;
+}
+#toolbar button {
+  padding:5px 16px; background:#2962ff; color:#fff; border:none;
+  border-radius:4px; cursor:pointer; font-size:13px; font-weight:bold;
+}
+#toolbar button:hover { background:#1e53e5; }
+.sep { width:1px; height:24px; background:#363a45; margin:0 4px; }
+#info {
+  display:flex; align-items:center; gap:16px;
+  padding:6px 16px; background:#1e222d; border-bottom:1px solid #2a2e39;
+  font-size:12px; flex-wrap:wrap;
+}
+.stat { color:#787b86; }
+.stat b { color:#d1d4dc; }
+.trend-badge { padding:2px 8px; border-radius:3px; font-weight:bold; font-size:12px; }
+#chart { width:100%; height:calc(100vh - 90px); }
+#error { color:#ef5350; padding:20px; font-size:16px; display:none; }
+</style>''')
+    h.append('</head>')
+    h.append('<body>')
+
+    # ── TOOLBAR ──
+    h.append('<div id="toolbar">')
+    h.append('  <label>종목</label>')
+    h.append('  <input type="text" id="codeInput" value="' + code + '" placeholder="005930" onkeydown="if(event.key===\'Enter\')goChart()">')
+    h.append('  <label>타임프레임</label>')
+    h.append('  <select id="tfSelect" onchange="onTfChange()">' + tf_opts + '</select>')
+    h.append('  <label>일자</label>')
+    h.append('  <input type="date" id="dateInput" value="' + date_val + '"' + date_dis + '>')
+    h.append('  <div class="sep"></div>')
+    h.append('  <label>횡보필터</label>')
+    h.append('  <select id="filterSelect">' + filter_opts + '</select>')
+    h.append('  <div class="sep"></div>')
+    h.append('  <button onclick="goChart()">적용</button>')
+    h.append('</div>')
+
+    # ── INFO BAR ──
+    h.append('<div id="info">')
+    h.append('  <span class="stat"><b>' + code + ' ' + name + '</b> &nbsp; ' + tf_label + '</span>')
+    h.append('  <span class="stat">종가 <b>' + format(last_close, ',.0f') + '</b></span>')
+    h.append('  <span class="stat">AEST <b>' + format(last_aest, ',.0f') + '</b></span>')
+    h.append('  <span class="trend-badge" style="background:' + trend_clr + ';color:#fff">' + last_trend_str + '</span>')
+    h.append('  <span class="stat">ST전환 <b>' + str(st_flips) + '회</b></span>')
+    h.append('  <span class="stat">AEST전환 <b>' + str(aest_flips) + '회</b></span>')
+    h.append('  <span class="stat">감소 <b>' + str(reduction) + '%</b></span>')
+    h.append('  <span class="stat">횡보 <b>' + str(range_bars) + '봉 (' + str(range_pct) + '%)</b></span>')
+    h.append('  <span class="stat">총 <b>' + str(len(df)) + '봉</b></span>')
+    h.append('  <span class="stat">필터 <b>' + filter_name + '</b></span>')
+    h.append('</div>')
+
+    # ── CHART + ERROR ──
+    h.append('<div id="chart"></div>')
+    h.append('<div id="error"></div>')
+
+    # ── JAVASCRIPT ──
+    h.append('<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>')
+    h.append('<script>')
+
+    h.append('''
+function onTfChange() {
+  var tf = document.getElementById('tfSelect').value;
+  var dateEl = document.getElementById('dateInput');
+  if (tf === 'D') {
+    dateEl.disabled = true;
+    dateEl.value = '';
+  } else {
+    dateEl.disabled = false;
+  }
+}
+
+function goChart() {
+  var code = document.getElementById('codeInput').value.trim();
+  var tf = document.getElementById('tfSelect').value;
+  var filter = document.getElementById('filterSelect').value;
+  var date = document.getElementById('dateInput').value || '';
+  if (!code) { alert('종목코드를 입력하세요'); return; }
+  var url = '/?code=' + code + '&tf=' + tf + '&filter=' + encodeURIComponent(filter);
+  if (date && tf !== 'D') { url += '&date=' + date; }
+  window.location.href = url;
+}
+''')
+
+    # ── 차트 생성 ──
+    h.append('try {')
+    h.append('  var container = document.getElementById("chart");')
+    h.append('  var chart = LightweightCharts.createChart(container, {')
+    h.append('    width: container.clientWidth, height: container.clientHeight,')
+    h.append('    layout: { background: { type: "solid", color: "#131722" }, textColor: "#d1d4dc" },')
+    h.append('    grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },')
+    h.append('    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },')
+    h.append('    rightPriceScale: { borderColor: "#2a2e39" },')
+    h.append('    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false }')
+    h.append('  });')
+
+    # 캔들
+    h.append('  var cs = chart.addCandlestickSeries({')
+    h.append('    upColor:"#26a69a", downColor:"#ef5350",')
+    h.append('    borderUpColor:"#26a69a", borderDownColor:"#ef5350",')
+    h.append('    wickUpColor:"#26a69a", wickDownColor:"#ef5350"')
+    h.append('  });')
+    h.append('  cs.setData(' + candles_json + ');')
+
+    # 볼륨
+    h.append('  var vs = chart.addHistogramSeries({')
+    h.append('    priceFormat:{type:"volume"}, priceScaleId:"vol"')
+    h.append('  });')
+    h.append('  chart.priceScale("vol").applyOptions({scaleMargins:{top:0.85,bottom:0}});')
+    h.append('  vs.setData(' + volumes_json + ');')
+
+    # ST
+    if len(st_data) > 0:
+        h.append('  var stS = chart.addLineSeries({')
+        h.append('    color:"#787b86", lineWidth:1, lineStyle:2,')
+        h.append('    lastValueVisible:false, priceLineVisible:false, title:"ST"')
+        h.append('  });')
+        h.append('  stS.setData(' + st_json + ');')
+
+    # AEST
+    if len(aest_data) > 0:
+        h.append('  var aS = chart.addLineSeries({')
+        h.append('    lineWidth:3, lastValueVisible:true,')
+        h.append('    priceLineVisible:false, title:"AEST"')
+        h.append('  });')
+        h.append('  aS.setData(' + aest_json + ');')
+
+    # 마커
+    if len(markers) > 0:
+        h.append('  cs.setMarkers(' + markers_json + ');')
+
+    h.append('  chart.timeScale().fitContent();')
+    h.append('  window.addEventListener("resize", function(){')
+    h.append('    chart.applyOptions({width:container.clientWidth,height:container.clientHeight});')
+    h.append('  });')
+
+    h.append('} catch(e) {')
+    h.append('  var ed = document.getElementById("error");')
+    h.append('  ed.style.display="block";')
+    h.append('  ed.innerText="Chart Error: "+e.message;')
+    h.append('  console.error(e);')
+    h.append('}')
+
+    h.append('</script>')
+    h.append('</body>')
+    h.append('</html>')
+
+    return '\n'.join(h)

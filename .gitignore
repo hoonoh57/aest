@@ -1,0 +1,30 @@
+# ── 환경/비밀 ──
+.env
+*.env
+.env.*
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ── 생성파일 ──
+aest_chart.html
+*.log
