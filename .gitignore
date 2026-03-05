@@ -9,6 +9,7 @@ __pycache__/
 *.pyo
 *.pyd
 jma.py
+test*
 *.egg-info/
 dist/
 build/

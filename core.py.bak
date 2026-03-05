@@ -258,66 +258,231 @@ def compute_aest(df, atr_len=14, mult=3.0, range_filter_func=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  JMA (Jurik Moving Average)
+#  JMA (Jurik Moving Average) — pandas_ta 원본 알고리즘
+#   + 실시간 증분 계산 클래스
 # ═══════════════════════════════════════════════════════════════
-def compute_jma(series, length=7, phase=50, power=2):
+def _jma_static_params(length, phase):
+    """JMA 정적 파라미터 계산 (배치/증분 공용)"""
+    _length = max(int(length), 2)  # 최소 2 (half_len=0 방지)
+    _phase = float(phase)
+    half_len = 0.5 * (_length - 1)
+    pr = 0.5 if _phase < -100 else 2.5 if _phase > 100 else 1.5 + _phase * 0.01
+    length1 = max(np.log(np.sqrt(half_len)) / np.log(2.0) + 2.0, 0.0) if half_len > 0 else 2.0
+    pow1 = max(length1 - 2.0, 0.5)
+    length2 = length1 * np.sqrt(half_len) if half_len > 0 else 0.0
+    bet = length2 / (length2 + 1.0) if (length2 + 1.0) != 0 else 0.0
+    beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
+    return _length, pr, length1, pow1, bet, beta
+
+
+class JMAIncremental:
     """
-    JMA 계산 — Mark Jurik 방식 근사
-    series: numpy array 또는 pandas Series
-    returns: numpy array (JMA values)
+    JMA 실시간 증분 계산기
+
+    사용법:
+        jma = JMAIncremental(length=7, phase=50)
+
+        # 과거 데이터로 워밍업
+        for price in historical_closes:
+            val, trend = jma.update(price)
+
+        # 실시간: 확정 봉
+        val, trend = jma.update(new_close)
+
+        # 미확정 봉 미리보기 (상태 불변)
+        val, trend = jma.peek(current_price)
+    """
+
+    def __init__(self, length=7, phase=50):
+        self._length, self._pr, self._length1, self._pow1, self._bet, self._beta = \
+            _jma_static_params(length, phase)
+        self._sum_length = 10
+        # 동적 상태
+        self._volty_ring = np.zeros(self._sum_length)
+        self._vsum_ring = np.zeros(66)
+        self._ring_idx = 0
+        self._vsum_idx = 0
+        self._kv = 0.0
+        self._det0 = 0.0
+        self._det1 = 0.0
+        self._ma1 = 0.0
+        self._uBand = 0.0
+        self._lBand = 0.0
+        self._v_sum = 0.0
+        self._jma_val = np.nan
+        self._prev_jma = 0.0
+        self._trend = 0
+        self._count = 0
+
+    def _save_state(self):
+        return (self._kv, self._det0, self._det1, self._ma1,
+                self._uBand, self._lBand, self._v_sum,
+                self._jma_val, self._prev_jma, self._trend, self._count,
+                self._ring_idx, self._vsum_idx,
+                self._volty_ring.copy(), self._vsum_ring.copy())
+
+    def _restore_state(self, s):
+        (self._kv, self._det0, self._det1, self._ma1,
+         self._uBand, self._lBand, self._v_sum,
+         self._jma_val, self._prev_jma, self._trend, self._count,
+         self._ring_idx, self._vsum_idx,
+         self._volty_ring, self._vsum_ring) = s
+
+    def _step(self, price):
+        if self._count == 0:
+            self._jma_val = price
+            self._ma1 = price
+            self._uBand = price
+            self._lBand = price
+            self._prev_jma = price
+            self._v_sum = 0.0
+            self._det0 = 0.0
+            self._det1 = 0.0
+            self._volty_ring[:] = 0.0
+            self._vsum_ring[:] = 0.0
+            self._ring_idx = 0
+            self._vsum_idx = 0
+            self._count = 1
+            self._trend = 0
+            return self._jma_val, self._trend
+
+        # 1. 변동성
+        del1 = price - self._uBand
+        del2 = price - self._lBand
+        cur_volty = max(abs(del1), abs(del2)) if abs(del1) != abs(del2) else 0.0
+
+        old_volty = self._volty_ring[self._ring_idx % self._sum_length]
+        self._volty_ring[self._ring_idx % self._sum_length] = cur_volty
+        self._v_sum += (cur_volty - old_volty) / self._sum_length
+
+        self._vsum_ring[self._vsum_idx % 66] = self._v_sum
+        filled = min(self._count, 66)
+        total = 0.0
+        for k in range(filled):
+            total += self._vsum_ring[(self._vsum_idx - k) % 66]
+        avg_volty = total / filled if filled > 0 else 0.0
+
+        d_volty = cur_volty / avg_volty if avg_volty != 0 else 0.0
+        max_r = self._length1 ** (1.0 / self._pow1) if self._pow1 != 0 else 1.0
+        r_volty = max(1.0, min(max_r, d_volty))
+
+        # 2. 밴드
+        pow2 = r_volty ** self._pow1
+        self._kv = self._bet ** np.sqrt(pow2)
+        self._uBand = price if del1 > 0 else price - self._kv * del1
+        self._lBand = price if del2 < 0 else price - self._kv * del2
+
+        # 3. alpha
+        alpha = self._beta ** (r_volty ** self._pow1)
+
+        # 4. 3단계 필터
+        self._ma1 = (1.0 - alpha) * price + alpha * self._ma1
+        self._det0 = (price - self._ma1) * (1.0 - self._beta) + self._beta * self._det0
+        ma2 = self._ma1 + self._pr * self._det0
+        self._det1 = (ma2 - self._prev_jma) * (1.0 - alpha) ** 2 + alpha ** 2 * self._det1
+        self._jma_val = self._prev_jma + self._det1
+
+        # 5. 추세
+        if self._count >= self._length:
+            if self._jma_val > self._prev_jma:
+                self._trend = 1
+            elif self._jma_val < self._prev_jma:
+                self._trend = -1
+
+        self._prev_jma = self._jma_val
+        self._ring_idx += 1
+        self._vsum_idx += 1
+        self._count += 1
+        return self._jma_val, self._trend
+
+    def update(self, price):
+        """확정 봉 — 상태 영구 갱신"""
+        return self._step(price)
+
+    def peek(self, price):
+        """미확정 봉 — 상태 불변 미리보기"""
+        snap = self._save_state()
+        result = self._step(price)
+        self._restore_state(snap)
+        return result
+
+    @property
+    def value(self):
+        return self._jma_val
+
+    @property
+    def trend(self):
+        return self._trend
+
+    @property
+    def count(self):
+        return self._count
+
+
+def compute_jma(series, length=7, phase=50, power=None):
+    """
+    JMA 배치 계산 — Mark Jurik 원본 알고리즘 (pandas_ta 기반)
     """
     src = np.asarray(series, dtype=float)
-    n = len(src)
+    m = len(src)
+    _length, pr, length1, pow1, bet, beta = _jma_static_params(length, phase)
 
-    # phase를 -100~100 → 내부 파라미터로 변환
-    if phase < -100:
-        phase_ratio = 0.5
-    elif phase > 100:
-        phase_ratio = 2.5
-    else:
-        phase_ratio = phase / 100.0 + 1.5
+    jma_out = np.zeros(m, dtype=float)
+    volty = np.zeros(m, dtype=float)
+    v_sum = np.zeros(m, dtype=float)
+    sum_length = 10
 
-    beta = 0.45 * (length - 1) / (0.45 * (length - 1) + 2.0)
-    alpha = beta ** power
+    kv = det0 = det1 = ma2 = 0.0
+    jma_out[0] = ma1 = uBand = lBand = src[0]
 
-    jma = np.full(n, np.nan)
-    e0 = np.zeros(n)
-    e1 = np.zeros(n)
-    e2 = np.zeros(n)
+    for i in range(1, m):
+        price = src[i]
 
-    e0[0] = src[0]
-    e1[0] = 0.0
-    e2[0] = src[0]
-    jma[0] = src[0]
+        del1 = price - uBand
+        del2 = price - lBand
+        volty[i] = max(abs(del1), abs(del2)) if abs(del1) != abs(del2) else 0.0
 
-    for i in range(1, n):
-        e0[i] = (1 - alpha) * src[i] + alpha * e0[i-1]
-        e1[i] = (src[i] - e0[i]) * (1 - beta) + beta * e1[i-1]
-        e2[i] = e0[i] + phase_ratio * e1[i]
-        jma[i] = e2[i]
+        v_sum[i] = v_sum[i - 1] + (volty[i] - volty[max(i - sum_length, 0)]) / sum_length
+        avg_volty = np.mean(v_sum[max(i - 65, 0):i + 1])
 
-    return jma
+        d_volty = volty[i] / avg_volty if avg_volty != 0 else 0.0
+        max_r = length1 ** (1.0 / pow1) if pow1 != 0 else 1.0
+        r_volty = max(1.0, min(max_r, d_volty))
+
+        pow2 = r_volty ** pow1
+        kv = bet ** np.sqrt(pow2)
+        uBand = price if del1 > 0 else price - kv * del1
+        lBand = price if del2 < 0 else price - kv * del2
+
+        alpha = beta ** (r_volty ** pow1)
+
+        ma1 = (1.0 - alpha) * price + alpha * ma1
+        det0 = (price - ma1) * (1.0 - beta) + beta * det0
+        ma2 = ma1 + pr * det0
+        det1 = (ma2 - jma_out[i - 1]) * (1.0 - alpha) ** 2 + alpha ** 2 * det1
+        jma_out[i] = jma_out[i - 1] + det1
+
+    jma_out[0:_length - 1] = np.nan
+    return jma_out
 
 
-def compute_jma_trend(df, length=7, phase=50, power=2):
-    """
-    JMA를 계산하고 추세 방향을 판정하여 df에 컬럼 추가
-    jma_line, jma_trend (1=상승, -1=하락)
-    """
+def compute_jma_trend(df, length=7, phase=50, power=None):
+    """JMA + 추세 판정 → df에 jma_line, jma_trend 추가"""
     jma = compute_jma(df["close"].values, length, phase, power)
     df["jma_line"] = jma
-
-    trend = np.zeros(len(df))
-    for i in range(1, len(df)):
-        if jma[i] > jma[i-1]:
+    n = len(df)
+    trend = np.zeros(n)
+    for i in range(1, n):
+        if np.isnan(jma[i]) or np.isnan(jma[i - 1]):
+            trend[i] = 0
+        elif jma[i] > jma[i - 1]:
             trend[i] = 1
-        elif jma[i] < jma[i-1]:
+        elif jma[i] < jma[i - 1]:
             trend[i] = -1
         else:
-            trend[i] = trend[i-1]
+            trend[i] = trend[i - 1]
     df["jma_trend"] = trend
     return df
-
 
 # ═══════════════════════════════════════════════════════════════
 #  틱강도 (Tick Intensity) — 분봉 동기화

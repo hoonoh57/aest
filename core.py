@@ -259,123 +259,227 @@ def compute_aest(df, atr_len=14, mult=3.0, range_filter_func=None):
 
 # ═══════════════════════════════════════════════════════════════
 #  JMA (Jurik Moving Average) — pandas_ta 원본 알고리즘
+#   + 실시간 증분 계산 클래스
 # ═══════════════════════════════════════════════════════════════
-def compute_jma(series, length=7, phase=50, power=None):
+def _jma_static_params(length, phase):
+    """JMA 정적 파라미터 계산 (배치/증분 공용)"""
+    _length = max(int(length), 2)  # 최소 2 (half_len=0 방지)
+    _phase = float(phase)
+    half_len = 0.5 * (_length - 1)
+    pr = 0.5 if _phase < -100 else 2.5 if _phase > 100 else 1.5 + _phase * 0.01
+    length1 = max(np.log(np.sqrt(half_len)) / np.log(2.0) + 2.0, 0.0) if half_len > 0 else 2.0
+    pow1 = max(length1 - 2.0, 0.5)
+    length2 = length1 * np.sqrt(half_len) if half_len > 0 else 0.0
+    bet = length2 / (length2 + 1.0) if (length2 + 1.0) != 0 else 0.0
+    beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
+    return _length, pr, length1, pow1, bet, beta
+
+
+# ═══════════════════════════════════════════════════════════════
+#  JMA (Jurik Moving Average) — VB.NET 원본 기반
+#   + 실시간 증분 계산 클래스
+#
+#  핵심 파라미터:
+#    length : 기간 (period)
+#    phase  : 위상 [-100~100] → phaseRatio 0.5~2.5
+#    power  : alpha 지수 — alpha = beta^power
+#             power↑ → alpha↑ → 더 평탄 (노이즈 제거)
+#             power↓ → alpha↓ → 더 민감 (빠른 추종)
+# ═══════════════════════════════════════════════════════════════
+def _jma_params(length, phase, power):
+    """JMA 정적 파라미터 계산 (배치/증분 공용)"""
+    _length = max(int(length), 2)
+    _phase = float(phase)
+    _power = int(power) if power is not None else 2
+
+    if _phase < -100:
+        phase_ratio = 0.5
+    elif _phase > 100:
+        phase_ratio = 2.5
+    else:
+        phase_ratio = _phase / 100.0 + 1.5
+
+    beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
+    alpha = beta ** _power  # ← power가 직접 alpha 결정
+
+    return _length, phase_ratio, beta, alpha, _power
+
+
+class JMAIncremental:
     """
-    JMA 계산 — Mark Jurik 원본 알고리즘 (pandas_ta 기반)
-    3단계 적응형 필터:
-      1) 적응형 EMA (변동성 기반 alpha)
-      2) 칼만 필터 예비 평활
-      3) Jurik 고유 적응 필터
-    
-    series: numpy array 또는 pandas Series
-    length: 기간 (default 7)
-    phase:  위상 [-100 ~ 100] (default 50)
-    power:  미사용 (호환성 유지)
-    returns: numpy array (JMA values)
+    JMA 실시간 증분 계산기 — VB.NET 원본 알고리즘
+
+    사용법:
+        jma = JMAIncremental(length=7, phase=50, power=2)
+
+        # 과거 데이터로 워밍업
+        for price in historical_closes:
+            val, trend = jma.update(price)
+
+        # 실시간: 확정 봉
+        val, trend = jma.update(new_close)
+
+        # 미확정 봉 미리보기 (상태 불변)
+        val, trend = jma.peek(current_price)
+    """
+
+    def __init__(self, length=7, phase=50, power=2):
+        self._length, self._pr, self._beta, self._alpha, self._power = \
+            _jma_params(length, phase, power)
+
+        self._e0 = np.nan
+        self._e1 = np.nan
+        self._e2 = np.nan
+        self._jma_val = np.nan
+        self._prev_jma = np.nan
+        self._trend = 0
+        self._count = 0
+        # lookback 평균용
+        self._price_buffer = []
+
+    def _save_state(self):
+        return (self._e0, self._e1, self._e2,
+                self._jma_val, self._prev_jma, self._trend,
+                self._count, self._price_buffer.copy())
+
+    def _restore_state(self, s):
+        (self._e0, self._e1, self._e2,
+         self._jma_val, self._prev_jma, self._trend,
+         self._count, self._price_buffer) = s
+
+    def _step(self, price):
+        idx = self._count
+        alpha = self._alpha
+        beta = self._beta
+        pr = self._pr
+
+        # 초기화
+        if np.isnan(self._e0):
+            self._e0 = price
+            self._e1 = 0.0
+            self._e2 = 0.0
+            self._prev_jma = price
+
+        # 3단계 필터
+        self._e0 = (1.0 - alpha) * price + alpha * self._e0
+        self._e1 = (price - self._e0) * (1.0 - beta) + beta * self._e1
+        self._e2 = ((self._e0 + pr * self._e1 - self._prev_jma)
+                     * (1.0 - alpha) ** 2
+                     + alpha ** 2 * self._e2)
+
+        # lookback 기간: 단순평균 / 이후: JMA
+        self._price_buffer.append(price)
+        if idx < self._length:
+            current_jma = sum(self._price_buffer) / len(self._price_buffer)
+        else:
+            current_jma = round(self._e2 + self._prev_jma, 1)
+
+        # 추세 판정
+        if not np.isnan(self._prev_jma) and idx > 0:
+            if current_jma > self._prev_jma:
+                self._trend = 1
+            elif current_jma < self._prev_jma:
+                self._trend = -1
+            # 같으면 유지
+
+        self._jma_val = current_jma
+        self._prev_jma = current_jma
+        self._count += 1
+
+        return self._jma_val, self._trend
+
+    def update(self, price):
+        """확정 봉 — 상태 영구 갱신"""
+        return self._step(price)
+
+    def peek(self, price):
+        """미확정 봉 — 상태 불변 미리보기"""
+        snap = self._save_state()
+        result = self._step(price)
+        self._restore_state(snap)
+        return result
+
+    @property
+    def value(self):
+        return self._jma_val
+
+    @property
+    def trend(self):
+        return self._trend
+
+    @property
+    def count(self):
+        return self._count
+
+
+def compute_jma(series, length=7, phase=50, power=2):
+    """
+    JMA 배치 계산 — VB.NET 원본 알고리즘
+
+    alpha = beta^power 로 power가 직접 평활도를 결정:
+      power=1 → 가장 민감 (빠른 추종)
+      power=2 → 표준 (기본값)
+      power=3 → 더 평탄 (노이즈 제거 강화)
+
+    lookback 기간(index < length)에는 단순평균 사용
     """
     src = np.asarray(series, dtype=float)
     m = len(src)
+    _length, pr, beta, alpha, _power = _jma_params(length, phase, power)
 
-    jma_out = np.zeros(m, dtype=float)
-    volty = np.zeros(m, dtype=float)
-    v_sum = np.zeros(m, dtype=float)
+    jma_out = np.full(m, np.nan)
 
-    kv = 0.0
-    det0 = 0.0
-    det1 = 0.0
-    ma2 = 0.0
-    jma_out[0] = src[0]
-    ma1 = src[0]
-    uBand = src[0]
-    lBand = src[0]
+    e0 = np.nan
+    e1 = 0.0
+    e2 = 0.0
+    last_jma = np.nan
 
-    # ── 정적 파라미터 ──
-    sum_length = 10
-    _length = max(int(length), 1)
-    _phase = float(phase)
-
-    half_len = 0.5 * (_length - 1)
-    pr = 0.5 if _phase < -100 else 2.5 if _phase > 100 else 1.5 + _phase * 0.01
-
-    length1 = max(np.log(np.sqrt(half_len)) / np.log(2.0) + 2.0, 0.0)
-    pow1 = max(length1 - 2.0, 0.5)
-    length2 = length1 * np.sqrt(half_len)
-    bet = length2 / (length2 + 1.0) if (length2 + 1.0) != 0 else 0.0
-    beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
-
-    for i in range(1, m):
+    for i in range(m):
         price = src[i]
 
-        # ── 1. 가격 변동성 ──
-        del1 = price - uBand
-        del2 = price - lBand
-        if abs(del1) != abs(del2):
-            volty[i] = max(abs(del1), abs(del2))
+        # 초기화
+        if np.isnan(e0):
+            e0 = price
+            e1 = 0.0
+            e2 = 0.0
+            last_jma = price
+
+        # 3단계 필터
+        e0 = (1.0 - alpha) * price + alpha * e0
+        e1 = (price - e0) * (1.0 - beta) + beta * e1
+        e2 = ((e0 + pr * e1 - last_jma)
+              * (1.0 - alpha) ** 2
+              + alpha ** 2 * e2)
+
+        # lookback: 단순평균 / 이후: JMA
+        if i < _length:
+            current_jma = np.mean(src[:i + 1])
         else:
-            volty[i] = 0.0
+            current_jma = round(e2 + last_jma, 1)
 
-        # ── 2. 상대적 변동성 비율 ──
-        v_sum[i] = v_sum[i - 1] + (volty[i] - volty[max(i - sum_length, 0)]) / sum_length
-        start_idx = max(i - 65, 0)
-        avg_volty = np.mean(v_sum[start_idx:i + 1])
-
-        if avg_volty == 0:
-            d_volty = 0.0
-        else:
-            d_volty = volty[i] / avg_volty
-
-        r_volty = max(1.0, min(length1 ** (1.0 / pow1) if pow1 != 0 else 1.0, d_volty))
-
-        # ── 3. Jurik 변동성 밴드 ──
-        pow2 = r_volty ** pow1
-        kv = bet ** np.sqrt(pow2)
-        uBand = price if del1 > 0 else price - kv * del1
-        lBand = price if del2 < 0 else price - kv * del2
-
-        # ── 4. Jurik 동적 팩터 ──
-        power_val = r_volty ** pow1
-        alpha = beta ** power_val
-
-        # ── 5. 1단계: 적응형 EMA 예비 평활 ──
-        ma1 = (1.0 - alpha) * price + alpha * ma1
-
-        # ── 6. 2단계: 칼만 필터 예비 평활 ──
-        det0 = (price - ma1) * (1.0 - beta) + beta * det0
-        ma2 = ma1 + pr * det0
-
-        # ── 7. 3단계: Jurik 적응 필터 최종 평활 ──
-        det1 = (ma2 - jma_out[i - 1]) * (1.0 - alpha) * (1.0 - alpha) + alpha * alpha * det1
-        jma_out[i] = jma_out[i - 1] + det1
-
-    # 초기 lookback 구간 NaN 처리
-    jma_out[0:_length - 1] = np.nan
+        jma_out[i] = current_jma
+        last_jma = current_jma
 
     return jma_out
 
 
-def compute_jma_trend(df, length=7, phase=50, power=None):
-    """
-    JMA를 계산하고 추세 방향을 판정하여 df에 컬럼 추가
-    jma_line, jma_trend (1=상승, -1=하락)
-    """
+def compute_jma_trend(df, length=7, phase=50, power=2):
+    """JMA + 추세 판정 → df에 jma_line, jma_trend 추가"""
     jma = compute_jma(df["close"].values, length, phase, power)
     df["jma_line"] = jma
-
     n = len(df)
     trend = np.zeros(n)
     for i in range(1, n):
-        if np.isnan(jma[i]) or np.isnan(jma[i-1]):
+        if np.isnan(jma[i]) or np.isnan(jma[i - 1]):
             trend[i] = 0
-        elif jma[i] > jma[i-1]:
+        elif jma[i] > jma[i - 1]:
             trend[i] = 1
-        elif jma[i] < jma[i-1]:
+        elif jma[i] < jma[i - 1]:
             trend[i] = -1
         else:
-            trend[i] = trend[i-1]
+            trend[i] = trend[i - 1]
     df["jma_trend"] = trend
     return df
-
 # ═══════════════════════════════════════════════════════════════
 #  틱강도 (Tick Intensity) — 분봉 동기화
 # ═══════════════════════════════════════════════════════════════
