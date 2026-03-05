@@ -410,7 +410,6 @@ body { background:#131722; color:#d1d4dc; font-family:'Segoe UI',sans-serif; }
     h.append('  <div class="sep"></div>')
     h.append('  <button onclick="goChart()">적용</button>')
     h.append('</div>')
-
     # ── INFO BAR ──
     h.append('<div id="info">')
     h.append('  <span class="stat"><b>' + code + ' ' + name + '</b> &nbsp; ' + tf_label + '</span>')
