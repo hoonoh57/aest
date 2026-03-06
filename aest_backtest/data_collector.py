@@ -83,11 +83,21 @@ class DataCollector:
     def __init__(self, db: AestDB = None):
         self.db = db or AestDB()
 
+    # data_collector.py 의 _prev_business_day 교체
     def _prev_business_day(self, d: date) -> date:
+        """일봉 데이터가 존재하는 가장 최근 과거 영업일 조회"""
+        daily = self.db.get_daily('005930', d - timedelta(days=10), d)
+        if daily:
+            prev_dates = sorted([r['dt'] for r in daily if r['dt'] < d], reverse=True)
+            if prev_dates:
+                return prev_dates[0]
+        # fallback: 주말만 건너뛰기
         prev = d - timedelta(days=1)
         while prev.weekday() >= 5:
             prev -= timedelta(days=1)
         return prev
+
+
 
     # ── timedelta → 문자열 변환 헬퍼 ──
     def _tm_to_str(self, tm) -> str:
@@ -171,16 +181,30 @@ class DataCollector:
                 break
         d.bearish_count = count
 
-        # ── 7. 전일 + 당일 분봉 조회 ──
-        prev_day = self._prev_business_day(capture_date)
-        minutes_prev = self.db.get_minute(code, prev_day)
-        minutes_today = self.db.get_minute(code, capture_date)
-        minutes_all = (minutes_prev or []) + (minutes_today or [])
+        # ── 7. 워밍업 포함 분봉 조회 (5영업일) ──
+        warmup_start = capture_date - timedelta(days=10)
+        all_dates = set()
+        for r in (daily or []):
+            if warmup_start <= r['dt'] <= capture_date:
+                all_dates.add(r['dt'])
+        all_dates.add(capture_date)
+        
+        minutes_all = []
+        minutes_today = []
+        for dt in sorted(all_dates):
+            rows = self.db.get_minute(code, dt)
+            if rows:
+                minutes_all.extend(rows)
+                if dt == capture_date:
+                    minutes_today = rows
 
-        # ── 8. 전일 + 당일 30틱 조회 ──
-        tick30_prev = self.db.get_tick30(code, prev_day)
-        tick30_today = self.db.get_tick30(code, capture_date)
-        tick30_all = (tick30_prev or []) + (tick30_today or [])
+        # ── 8. 워밍업 포함 30틱 조회 (5영업일) ──
+        tick30_all = []
+        for dt in sorted(all_dates):
+            rows = self.db.get_tick30(code, dt)
+            if rows:
+                tick30_all.extend(rows)
+
 
         # ── 9. 당일 09:00~09:05 분봉으로 기본 지표 계산 ──
         early_minutes = [

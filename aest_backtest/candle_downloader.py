@@ -20,13 +20,19 @@ class CandleDownloader:
         self.db = AestDB()
         self.base = SERVER_BASE
 
-    # ── 전일 영업일 계산 ──
+    # candle_downloader.py 의 _prev_business_day 교체
     def _prev_business_day(self, d: date) -> date:
-        """주말 건너뛰기 (공휴일은 DB 조회로 보완 가능)"""
+        """일봉 데이터가 존재하는 가장 최근 과거 영업일 조회"""
+        daily = self.db.get_daily('005930', d - timedelta(days=10), d)
+        if daily:
+            prev_dates = sorted([r['dt'] for r in daily if r['dt'] < d], reverse=True)
+            if prev_dates:
+                return prev_dates[0]
         prev = d - timedelta(days=1)
-        while prev.weekday() >= 5:  # 5=토, 6=일
+        while prev.weekday() >= 5:
             prev -= timedelta(days=1)
         return prev
+
 
     # ── 분봉 다운로드 ──
     def download_minute(self, code: str, target_date: date) -> int:
