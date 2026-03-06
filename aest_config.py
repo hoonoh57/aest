@@ -70,3 +70,15 @@ PERFORMANCE = {
     "loser_max": -3.0,
     "trap_max": -5.0,
 }
+
+# ── Layer-2 매매 설정 ──
+LAYER2 = {
+    "default_tf": "m3",
+    "filter_name": "LonesomeTheBlue",
+    "tick_size": 30,
+    "initial_capital": 100_000_000,
+    "buy_amount_per_stock": 5_000_000,
+    "daily_target": 2.0,
+    "trailing_step": 0.5,
+    "emergency_stop": -3.0,
+}
