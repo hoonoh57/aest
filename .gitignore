@@ -29,4 +29,4 @@ Desktop.ini
 
 # ── 생성파일 ──
 aest_chart.html
-*.log
+*.log*.bak 

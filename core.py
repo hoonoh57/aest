@@ -7,7 +7,7 @@ core.py — 불변 로직
   - AEST 계산 엔진 (필터 주입 방식)
   - JMA (Jurik Moving Average)
   - 틱강도 (Tick Intensity)
-  - HTML 차트 생성
+  - HTML 차트 생성 (lightweight-charts v5.1)
 """
 
 import json
@@ -27,14 +27,14 @@ class ServerClient:
     """
 
     def __init__(self, host="localhost", port=8082):
-        self.base = f"http://{host}:{port}"
+        self.base = "http://" + host + ":" + str(port)
 
     def _get(self, path, params=None):
-        r = requests.get(f"{self.base}{path}", params=params, timeout=30)
+        r = requests.get(self.base + path, params=params, timeout=30)
         r.raise_for_status()
         js = r.json()
         if not js.get("Success"):
-            raise RuntimeError(f"API: {js.get('Message', 'unknown')}")
+            raise RuntimeError("API: " + js.get("Message", "unknown"))
         return js["Data"]
 
     def symbol_name(self, code):
@@ -64,7 +64,7 @@ class ServerClient:
             })
         df = pd.DataFrame(rows).sort_values("date").set_index("date")
         df = df[df["volume"] > 0]
-        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        print("  " + str(len(df)) + "봉 로드 (" + str(df.index[0]) + " ~ " + str(df.index[-1]) + ")")
         return df
 
     def minute_candles(self, code, tick=1):
@@ -86,22 +86,15 @@ class ServerClient:
             })
         df = pd.DataFrame(rows).sort_values("date").set_index("date")
         df = df[df["volume"] > 0]
-        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        print("  " + str(len(df)) + "봉 로드 (" + str(df.index[0]) + " ~ " + str(df.index[-1]) + ")")
         return df
 
     def minute_candles_from(self, code, tick=1, from_date=""):
-        """
-        분봉: 특정 일자 ~ 현재
-        from_date: "YYYY-MM-DD" or "YYYYMMDD"
-        stopTime = from_date 09:00:00
-        """
         if not from_date:
             return self.minute_candles(code, tick)
-
         d = from_date.replace("-", "")
         stop = d + "090000"
-
-        print(f"  API: /api/market/candles/minute?code={code}&tick={tick}&stopTime={stop}")
+        print("  API: /api/market/candles/minute?code=" + code + "&tick=" + str(tick) + "&stopTime=" + stop)
         data = self._get("/api/market/candles/minute", {
             "code": code, "tick": tick, "stopTime": stop,
         })
@@ -119,19 +112,13 @@ class ServerClient:
             })
         df = pd.DataFrame(rows).sort_values("date").set_index("date")
         df = df[df["volume"] > 0]
-        print(f"  {len(df)}봉 로드 ({df.index[0]} ~ {df.index[-1]})")
+        print("  " + str(len(df)) + "봉 로드 (" + str(df.index[0]) + " ~ " + str(df.index[-1]) + ")")
         return df
 
     def tick_candles(self, code, tick=30, stop_time=""):
-        """
-        틱캔들 조회
-        tick: 틱 간격 (15, 30, 60, 120 등)
-        stop_time: "YYYYMMDDHHmmss" — 이 시점까지 과거로 조회
-        """
         if not stop_time:
             stop_time = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d") + "090000"
-
-        print(f"  API: /api/market/candles/tick?code={code}&tick={tick}&stopTime={stop_time}")
+        print("  API: /api/market/candles/tick?code=" + code + "&tick=" + str(tick) + "&stopTime=" + stop_time)
         data = self._get("/api/market/candles/tick", {
             "code": code, "tick": tick, "stopTime": stop_time,
         })
@@ -149,7 +136,7 @@ class ServerClient:
             })
         df = pd.DataFrame(rows).sort_values("date").set_index("date")
         df = df[df["volume"] > 0]
-        print(f"  틱캔들({tick}틱): {len(df)}개 로드 ({df.index[0]} ~ {df.index[-1]})")
+        print("  틱캔들(" + str(tick) + "틱): " + str(len(df)) + "개 로드 (" + str(df.index[0]) + " ~ " + str(df.index[-1]) + ")")
         return df
 
 
@@ -159,22 +146,18 @@ class ServerClient:
 def compute_supertrend(df, atr_len=14, mult=3.0):
     h, l, c = df["high"].values.astype(float), df["low"].values.astype(float), df["close"].values.astype(float)
     n = len(df)
-
     tr = np.zeros(n)
     tr[0] = h[0] - l[0]
     for i in range(1, n):
         tr[i] = max(h[i] - l[i], abs(h[i] - c[i-1]), abs(l[i] - c[i-1]))
-
     atr = np.full(n, np.nan)
     atr[atr_len - 1] = np.mean(tr[:atr_len])
     for i in range(atr_len, n):
         atr[i] = (atr[i-1] * (atr_len - 1) + tr[i]) / atr_len
-
     mid = (h + l) / 2.0
     upper, lower = mid + mult * atr, mid - mult * atr
     trend = np.ones(n)
     st_line = np.full(n, np.nan)
-
     for i in range(1, n):
         if np.isnan(atr[i]):
             continue
@@ -187,7 +170,6 @@ def compute_supertrend(df, atr_len=14, mult=3.0):
         else:
             trend[i] = 1 if c[i] > upper[i] else -1
         st_line[i] = lower[i] if trend[i] == 1 else upper[i]
-
     df["st_line"] = st_line
     df["st_trend"] = trend
     return df
@@ -197,15 +179,8 @@ def compute_supertrend(df, atr_len=14, mult=3.0):
 #  AEST 엔진 (횡보 필터 주입 방식)
 # ═══════════════════════════════════════════════════════════════
 def compute_aest(df, atr_len=14, mult=3.0, range_filter_func=None):
-    """
-    Adaptive SuperTrend — 횡보 필터 기반
-    range_filter_func(df) → bool 배열 (True=횡보, False=추세)
-    횡보 구간에서는 ST 전환을 차단
-    """
     h, l, c = df["high"].values.astype(float), df["low"].values.astype(float), df["close"].values.astype(float)
     n = len(df)
-
-    # EATR
     tr = np.zeros(n)
     tr[0] = h[0] - l[0]
     for i in range(1, n):
@@ -215,64 +190,33 @@ def compute_aest(df, atr_len=14, mult=3.0, range_filter_func=None):
     eatr[0] = tr[0]
     for i in range(1, n):
         eatr[i] = alpha * tr[i] + (1 - alpha) * eatr[i-1]
-
     mid = (h + l) / 2.0
     upper, lower = mid + mult * eatr, mid - mult * eatr
-
-    # 횡보 판정
     if range_filter_func is not None:
         is_range = range_filter_func(df)
     else:
         is_range = np.zeros(n, dtype=bool)
-
     trend = np.ones(n)
     aest_line = np.full(n, np.nan)
-
     for i in range(1, n):
         if np.isnan(eatr[i]):
             continue
-
-        # Lock bands
         if lower[i] < lower[i-1] and c[i-1] > lower[i-1]:
             lower[i] = lower[i-1]
         if upper[i] > upper[i-1] and c[i-1] < upper[i-1]:
             upper[i] = upper[i-1]
-
-        # 추세 결정
         if is_range[i]:
-            # 횡보 → 전환 차단
             trend[i] = trend[i-1]
         else:
-            # 추세 → 정상 판단
             if trend[i-1] == 1:
                 trend[i] = -1 if c[i] < lower[i] else 1
             else:
                 trend[i] = 1 if c[i] > upper[i] else -1
-
         aest_line[i] = lower[i] if trend[i] == 1 else upper[i]
-
     df["aest_line"] = aest_line
     df["aest_trend"] = trend
     df["aest_is_range"] = is_range
     return df
-
-
-# ═══════════════════════════════════════════════════════════════
-#  JMA (Jurik Moving Average) — pandas_ta 원본 알고리즘
-#   + 실시간 증분 계산 클래스
-# ═══════════════════════════════════════════════════════════════
-def _jma_static_params(length, phase):
-    """JMA 정적 파라미터 계산 (배치/증분 공용)"""
-    _length = max(int(length), 2)  # 최소 2 (half_len=0 방지)
-    _phase = float(phase)
-    half_len = 0.5 * (_length - 1)
-    pr = 0.5 if _phase < -100 else 2.5 if _phase > 100 else 1.5 + _phase * 0.01
-    length1 = max(np.log(np.sqrt(half_len)) / np.log(2.0) + 2.0, 0.0) if half_len > 0 else 2.0
-    pow1 = max(length1 - 2.0, 0.5)
-    length2 = length1 * np.sqrt(half_len) if half_len > 0 else 0.0
-    bet = length2 / (length2 + 1.0) if (length2 + 1.0) != 0 else 0.0
-    beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
-    return _length, pr, length1, pow1, bet, beta
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -283,50 +227,26 @@ def _jma_static_params(length, phase):
 #    length : 기간 (period)
 #    phase  : 위상 [-100~100] → phaseRatio 0.5~2.5
 #    power  : alpha 지수 — alpha = beta^power
-#             power↑ → alpha↑ → 더 평탄 (노이즈 제거)
-#             power↓ → alpha↓ → 더 민감 (빠른 추종)
 # ═══════════════════════════════════════════════════════════════
 def _jma_params(length, phase, power):
-    """JMA 정적 파라미터 계산 (배치/증분 공용)"""
     _length = max(int(length), 2)
     _phase = float(phase)
     _power = int(power) if power is not None else 2
-
     if _phase < -100:
         phase_ratio = 0.5
     elif _phase > 100:
         phase_ratio = 2.5
     else:
         phase_ratio = _phase / 100.0 + 1.5
-
     beta = 0.45 * (_length - 1) / (0.45 * (_length - 1) + 2.0)
-    alpha = beta ** _power  # ← power가 직접 alpha 결정
-
+    alpha = beta ** _power
     return _length, phase_ratio, beta, alpha, _power
 
 
 class JMAIncremental:
-    """
-    JMA 실시간 증분 계산기 — VB.NET 원본 알고리즘
-
-    사용법:
-        jma = JMAIncremental(length=7, phase=50, power=2)
-
-        # 과거 데이터로 워밍업
-        for price in historical_closes:
-            val, trend = jma.update(price)
-
-        # 실시간: 확정 봉
-        val, trend = jma.update(new_close)
-
-        # 미확정 봉 미리보기 (상태 불변)
-        val, trend = jma.peek(current_price)
-    """
-
     def __init__(self, length=7, phase=50, power=2):
         self._length, self._pr, self._beta, self._alpha, self._power = \
             _jma_params(length, phase, power)
-
         self._e0 = np.nan
         self._e1 = np.nan
         self._e2 = np.nan
@@ -334,7 +254,6 @@ class JMAIncremental:
         self._prev_jma = np.nan
         self._trend = 0
         self._count = 0
-        # lookback 평균용
         self._price_buffer = []
 
     def _save_state(self):
@@ -352,48 +271,35 @@ class JMAIncremental:
         alpha = self._alpha
         beta = self._beta
         pr = self._pr
-
-        # 초기화
         if np.isnan(self._e0):
             self._e0 = price
             self._e1 = 0.0
             self._e2 = 0.0
             self._prev_jma = price
-
-        # 3단계 필터
         self._e0 = (1.0 - alpha) * price + alpha * self._e0
         self._e1 = (price - self._e0) * (1.0 - beta) + beta * self._e1
         self._e2 = ((self._e0 + pr * self._e1 - self._prev_jma)
                      * (1.0 - alpha) ** 2
                      + alpha ** 2 * self._e2)
-
-        # lookback 기간: 단순평균 / 이후: JMA
         self._price_buffer.append(price)
         if idx < self._length:
             current_jma = sum(self._price_buffer) / len(self._price_buffer)
         else:
             current_jma = round(self._e2 + self._prev_jma, 1)
-
-        # 추세 판정
         if not np.isnan(self._prev_jma) and idx > 0:
             if current_jma > self._prev_jma:
                 self._trend = 1
             elif current_jma < self._prev_jma:
                 self._trend = -1
-            # 같으면 유지
-
         self._jma_val = current_jma
         self._prev_jma = current_jma
         self._count += 1
-
         return self._jma_val, self._trend
 
     def update(self, price):
-        """확정 봉 — 상태 영구 갱신"""
         return self._step(price)
 
     def peek(self, price):
-        """미확정 봉 — 상태 불변 미리보기"""
         snap = self._save_state()
         result = self._step(price)
         self._restore_state(snap)
@@ -413,58 +319,36 @@ class JMAIncremental:
 
 
 def compute_jma(series, length=7, phase=50, power=2):
-    """
-    JMA 배치 계산 — VB.NET 원본 알고리즘
-
-    alpha = beta^power 로 power가 직접 평활도를 결정:
-      power=1 → 가장 민감 (빠른 추종)
-      power=2 → 표준 (기본값)
-      power=3 → 더 평탄 (노이즈 제거 강화)
-
-    lookback 기간(index < length)에는 단순평균 사용
-    """
     src = np.asarray(series, dtype=float)
     m = len(src)
     _length, pr, beta, alpha, _power = _jma_params(length, phase, power)
-
     jma_out = np.full(m, np.nan)
-
     e0 = np.nan
     e1 = 0.0
     e2 = 0.0
     last_jma = np.nan
-
     for i in range(m):
         price = src[i]
-
-        # 초기화
         if np.isnan(e0):
             e0 = price
             e1 = 0.0
             e2 = 0.0
             last_jma = price
-
-        # 3단계 필터
         e0 = (1.0 - alpha) * price + alpha * e0
         e1 = (price - e0) * (1.0 - beta) + beta * e1
         e2 = ((e0 + pr * e1 - last_jma)
               * (1.0 - alpha) ** 2
               + alpha ** 2 * e2)
-
-        # lookback: 단순평균 / 이후: JMA
         if i < _length:
             current_jma = np.mean(src[:i + 1])
         else:
             current_jma = round(e2 + last_jma, 1)
-
         jma_out[i] = current_jma
         last_jma = current_jma
-
     return jma_out
 
 
 def compute_jma_trend(df, length=7, phase=50, power=2):
-    """JMA + 추세 판정 → df에 jma_line, jma_trend 추가"""
     jma = compute_jma(df["close"].values, length, phase, power)
     df["jma_line"] = jma
     n = len(df)
@@ -480,61 +364,47 @@ def compute_jma_trend(df, length=7, phase=50, power=2):
             trend[i] = trend[i - 1]
     df["jma_trend"] = trend
     return df
+
+
 # ═══════════════════════════════════════════════════════════════
 #  틱강도 (Tick Intensity) — 분봉 동기화
 # ═══════════════════════════════════════════════════════════════
 def compute_tick_intensity(df_minute, df_tick, tick_size=30):
-    """
-    분봉 DataFrame의 각 봉 구간에서 완성된 틱캔들 수를 계산
-
-    df_minute: 분봉 DataFrame (DatetimeIndex)
-    df_tick:   틱캔들 DataFrame (DatetimeIndex) — tick_size 틱 단위
-    tick_size: 틱캔들 크기 (참고용, 실제 카운트는 df_tick 행 수로)
-
-    returns: df_minute에 tick_intensity, tick_ma5, tick_ma20 컬럼 추가
-    """
     times = df_minute.index
     intensity = np.zeros(len(df_minute), dtype=int)
-
     for i in range(len(times)):
         if i == 0:
-            # 첫 봉: 해당 봉 시간 이전 충분한 여유
-            t_start = times[0] - pd.Timedelta(minutes=10)
+            if len(times) > 1:
+                interval = times[1] - times[0]
+            else:
+                interval = pd.Timedelta(minutes=3)
+            t_start = times[0] - interval
         else:
             t_start = times[i-1]
         t_end = times[i]
-
-        # 해당 구간의 틱캔들 수 카운트
         mask = (df_tick.index > t_start) & (df_tick.index <= t_end)
         intensity[i] = int(mask.sum())
-
     df_minute["tick_intensity"] = intensity
-
-    # 5이평, 20이평
     ti = df_minute["tick_intensity"].values.astype(float)
     ma5 = np.full(len(ti), np.nan)
     ma20 = np.full(len(ti), np.nan)
-
     for i in range(4, len(ti)):
         ma5[i] = np.mean(ti[i-4:i+1])
     for i in range(19, len(ti)):
         ma20[i] = np.mean(ti[i-19:i+1])
-
     df_minute["tick_ma5"] = ma5
     df_minute["tick_ma20"] = ma20
-
     return df_minute
 
 
 # ═══════════════════════════════════════════════════════════════
-#  HTML 차트 생성 (lightweight-charts)
+#  HTML 차트 생성 (lightweight-charts v5.1)
 # ═══════════════════════════════════════════════════════════════
 def build_html(df, code, name, tf_label, filter_name, filter_list,
                tf_options, current_tf, current_date="",
                tick_size=0):
-    """lightweight-charts HTML — 문자열 결합 방식 (f-string 충돌 원천 차단)"""
+    """lightweight-charts v5.1 HTML — 문자열 결합 방식 (f-string 충돌 원천 차단)"""
 
-    # numpy 타입 JSON 직렬화 지원
     class NpEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, (np.integer,)):
@@ -576,7 +446,7 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
             if pd.notna(v):
                 st_data.append({"time": r["time"], "value": float(v)})
 
-    # ── 5) AEST 라인 ──
+    # ── 5) AEST 라인 (포인트별 색상) ──
     aest_data = []
     if "aest_line" in df.columns:
         for _, r in df.iterrows():
@@ -585,13 +455,13 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
                 clr = "#26a69a" if r.get("aest_trend", 0) == 1 else "#ef5350"
                 aest_data.append({"time": r["time"], "value": float(v), "color": clr})
 
-    # ── 5b) JMA 라인 ──
+    # ── 5b) JMA 라인 (포인트별 색상 — 상승 초록, 하락 주황) ──
     jma_data = []
     if "jma_line" in df.columns:
         for _, r in df.iterrows():
             v = r["jma_line"]
             if pd.notna(v):
-                clr = "#ffeb3b" if r.get("jma_trend", 0) == 1 else "#ff9800"
+                clr = "#00e676" if r.get("jma_trend", 0) == 1 else "#ff6d00"
                 jma_data.append({"time": r["time"], "value": float(v), "color": clr})
 
     # ── 6) 레인지 마커 ──
@@ -616,19 +486,21 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
                     markers.append({"time": row["time"], "position": "aboveBar",
                                     "color": "#ef5350", "shape": "arrowDown", "text": "DN"})
 
-    # ── 7b) JMA 전환 마커 ──
+    # ── 7b) JMA 전환 마커 (일봉 제외) ──
     jma_markers = []
-    if "jma_trend" in df.columns:
+    if "jma_trend" in df.columns and current_tf != "D":
         jt = df["jma_trend"].values
         for i in range(1, len(df)):
             if jt[i] != jt[i-1] and jt[i] != 0:
                 row = df.iloc[i]
                 if jt[i] == 1:
                     jma_markers.append({"time": row["time"], "position": "belowBar",
-                                        "color": "#ffeb3b", "shape": "circle", "text": "J\u2191"})
+                                        "color": "#00e676", "shape": "circle",
+                                        "text": "J\u2191"})
                 else:
                     jma_markers.append({"time": row["time"], "position": "aboveBar",
-                                        "color": "#ff9800", "shape": "circle", "text": "J\u2193"})
+                                        "color": "#ff6d00", "shape": "circle",
+                                        "text": "J\u2193"})
 
     # ── 8) 통계 ──
     st_flips = 0
@@ -657,7 +529,7 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
     last_jma = float(last["jma_line"]) if "jma_line" in df.columns and pd.notna(last.get("jma_line")) else 0
     last_jma_trend = last.get("jma_trend", 0)
     jma_trend_str = "\u2191" if last_jma_trend == 1 else "\u2193"
-    jma_clr = "#ffeb3b" if last_jma_trend == 1 else "#ff9800"
+    jma_clr = "#00e676" if last_jma_trend == 1 else "#ff6d00"
 
     # ── 틱강도 데이터 ──
     tick_int_data = []
@@ -676,7 +548,6 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
             else:
                 ti_clr = "rgba(120,123,134,0.5)"
             tick_int_data.append({"time": t, "value": ti_val, "color": ti_clr})
-
             if pd.notna(m5):
                 tick_ma5_data.append({"time": t, "value": float(m5)})
             if pd.notna(m20):
@@ -687,9 +558,8 @@ def build_html(df, code, name, tf_label, filter_name, filter_list,
     volumes_json = json.dumps(volumes, ensure_ascii=False, cls=NpEncoder)
     st_json = json.dumps(st_data, ensure_ascii=False, cls=NpEncoder)
     aest_json = json.dumps(aest_data, ensure_ascii=False, cls=NpEncoder)
-    markers_json = json.dumps(markers, ensure_ascii=False, cls=NpEncoder)
     jma_json = json.dumps(jma_data, ensure_ascii=False, cls=NpEncoder)
-    jma_markers_json = json.dumps(jma_markers, ensure_ascii=False, cls=NpEncoder)
+    range_json = json.dumps(range_marks, ensure_ascii=False, cls=NpEncoder)
     tick_int_json = json.dumps(tick_int_data, ensure_ascii=False, cls=NpEncoder)
     tick_ma5_json = json.dumps(tick_ma5_data, ensure_ascii=False, cls=NpEncoder)
     tick_ma20_json = json.dumps(tick_ma20_data, ensure_ascii=False, cls=NpEncoder)
@@ -780,7 +650,7 @@ body { background:#131722; color:#d1d4dc; font-family:'Segoe UI',sans-serif; }
     # ── TOOLBAR ──
     h.append('<div id="toolbar">')
     h.append('  <label>\uc885\ubaa9</label>')
-    h.append('  <input type="text" id="codeInput" value="' + code + '" placeholder="005930" onkeydown="if(event.key===\'Enter\')goChart()">')
+    h.append('  <input type="text" id="codeInput" value="' + code + '" placeholder="005930">')
     h.append('  <label>\ud0c0\uc784\ud504\ub808\uc784</label>')
     h.append('  <select id="tfSelect" onchange="onTfChange()">' + tf_opts + '</select>')
     h.append('  <label>\uc77c\uc790</label>')
@@ -817,126 +687,179 @@ body { background:#131722; color:#d1d4dc; font-family:'Segoe UI',sans-serif; }
     h.append('<div id="chart"></div>')
     h.append('<div id="error"></div>')
 
-    # ── JAVASCRIPT ──
-    h.append('<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>')
+    # ── JAVASCRIPT (lightweight-charts v5.1) ──
+    h.append('<script src="https://unpkg.com/lightweight-charts@5.1.0/dist/lightweight-charts.standalone.production.js"></script>')
     h.append('<script>')
 
+    # -- 데이터 변수 --
+    h.append('var candle_data = ' + candles_json + ';')
+    h.append('var volume_data = ' + volumes_json + ';')
+    h.append('var st_data = ' + st_json + ';')
+    h.append('var aest_data = ' + aest_json + ';')
+    h.append('var jma_data = ' + jma_json + ';')
+    h.append('var range_data = ' + range_json + ';')
+    h.append('var all_markers = ' + all_markers_json + ';')
+    h.append('var tick_int_data = ' + tick_int_json + ';')
+    h.append('var tick_ma5_data = ' + tick_ma5_json + ';')
+    h.append('var tick_ma20_data = ' + tick_ma20_json + ';')
+
+    # -- 유틸 함수 --
     h.append('''
 function onTfChange() {
-  var tf = document.getElementById('tfSelect').value;
-  var dateEl = document.getElementById('dateInput');
-  if (tf === 'D') {
-    dateEl.disabled = true;
-    dateEl.value = '';
+  var tf = document.getElementById("tfSelect").value;
+  var di = document.getElementById("dateInput");
+  if (tf === "D") {
+    di.disabled = true;
+    di.value = "";
   } else {
-    dateEl.disabled = false;
+    di.disabled = false;
   }
 }
-
 function goChart() {
-  var code = document.getElementById('codeInput').value.trim();
-  var tf = document.getElementById('tfSelect').value;
-  var filter = document.getElementById('filterSelect').value;
-  var date = document.getElementById('dateInput').value || '';
-  var tick = document.getElementById('tickSelect').value;
-  if (!code) { alert('종목코드를 입력하세요'); return; }
-  var url = '/?code=' + code + '&tf=' + tf + '&filter=' + encodeURIComponent(filter);
-  if (date && tf !== 'D') { url += '&date=' + date; }
-  if (tick && tick !== '0') { url += '&tick=' + tick; }
+  var c = document.getElementById("codeInput").value.trim();
+  var tf = document.getElementById("tfSelect").value;
+  var f = document.getElementById("filterSelect").value;
+  var d = document.getElementById("dateInput").value;
+  var tk = document.getElementById("tickSelect").value;
+  var url = "/?code=" + c + "&tf=" + tf + "&filter=" + encodeURIComponent(f);
+  if (d && tf !== "D") url += "&date=" + d;
+  if (tk && tk !== "0") url += "&tick=" + tk;
   window.location.href = url;
 }
+document.addEventListener("keydown", function(e) {
+  if (e.key === "Enter") goChart();
+});
 ''')
 
-    # ── 차트 생성 ──
+    # -- 차트 생성 (v5 API) --
+    h.append('var LWC = LightweightCharts;')
     h.append('try {')
-    h.append('  var container = document.getElementById("chart");')
-    h.append('  var chart = LightweightCharts.createChart(container, {')
-    h.append('    width: container.clientWidth, height: container.clientHeight,')
-    h.append('    layout: { background: { type: "solid", color: "#131722" }, textColor: "#d1d4dc" },')
-    h.append('    grid: { vertLines: { color: "#1e222d" }, horzLines: { color: "#1e222d" } },')
-    h.append('    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },')
-    h.append('    rightPriceScale: { borderColor: "#2a2e39" },')
-    h.append('    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false }')
+    h.append('var chartEl = document.getElementById("chart");')
+    h.append('var chart = LWC.createChart(chartEl, {')
+    h.append('  width: chartEl.clientWidth,')
+    h.append('  height: chartEl.clientHeight,')
+    h.append('  layout: {')
+    h.append('    background: { type: "solid", color: "#131722" },')
+    h.append('    textColor: "#d1d4dc",')
+    h.append('    attributionLogo: false,')
+    h.append('    panes: { separatorColor: "#2a2e39" }')
+    h.append('  },')
+    h.append('  grid: {')
+    h.append('    vertLines: { color: "#1e222d" },')
+    h.append('    horzLines: { color: "#1e222d" }')
+    h.append('  },')
+    h.append('  crosshair: { mode: 0 },')
+    h.append('  rightPriceScale: { borderColor: "#2a2e39" },')
+    h.append('  timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false }')
+    h.append('});')
+
+    # -- 캔들 시리즈 (pane 0) --
+    h.append('var candleSeries = chart.addSeries(LWC.CandlestickSeries, {')
+    h.append('  upColor: "#26a69a", downColor: "#ef5350",')
+    h.append('  borderUpColor: "#26a69a", borderDownColor: "#ef5350",')
+    h.append('  wickUpColor: "#26a69a", wickDownColor: "#ef5350"')
+    h.append('});')
+    h.append('candleSeries.setData(candle_data);')
+
+    # -- 볼륨 시리즈 (pane 0, priceScaleId: "vol") --
+    h.append('var volSeries = chart.addSeries(LWC.HistogramSeries, {')
+    h.append('  priceFormat: { type: "volume" },')
+    h.append('  priceScaleId: "vol",')
+    h.append('  lastValueVisible: false,')
+    h.append('  priceLineVisible: false')
+    h.append('});')
+    h.append('volSeries.setData(volume_data);')
+    h.append('chart.priceScale("vol").applyOptions({')
+    h.append('  scaleMargins: { top: 0.8, bottom: 0 }')
+    h.append('});')
+
+    # -- ST 라인 (회색 점선, pane 0) --
+    h.append('if (st_data.length > 0) {')
+    h.append('  var stSeries = chart.addSeries(LWC.LineSeries, {')
+    h.append('    color: "#787b86", lineWidth: 1, lineStyle: 2,')
+    h.append('    lastValueVisible: false, priceLineVisible: false, title: "ST"')
     h.append('  });')
+    h.append('  stSeries.setData(st_data);')
+    h.append('}')
 
-    # 캔들
-    h.append('  var cs = chart.addCandlestickSeries({')
-    h.append('    upColor:"#26a69a", downColor:"#ef5350",')
-    h.append('    borderUpColor:"#26a69a", borderDownColor:"#ef5350",')
-    h.append('    wickUpColor:"#26a69a", wickDownColor:"#ef5350"')
+    # -- AEST 라인 (포인트별 색상, pane 0) --
+    h.append('if (aest_data.length > 0) {')
+    h.append('  var aestSeries = chart.addSeries(LWC.LineSeries, {')
+    h.append('    lineWidth: 2, lastValueVisible: true,')
+    h.append('    priceLineVisible: false, title: "AEST"')
     h.append('  });')
-    h.append('  cs.setData(' + candles_json + ');')
+    h.append('  aestSeries.setData(aest_data);')
+    h.append('}')
 
-    # 볼륨
-    h.append('  var vs = chart.addHistogramSeries({')
-    h.append('    priceFormat:{type:"volume"}, priceScaleId:"vol"')
+    # -- JMA 라인 (포인트별 색상 — 상승 #00e676, 하락 #ff6d00, pane 0) --
+    h.append('if (jma_data.length > 0) {')
+    h.append('  var jmaSeries = chart.addSeries(LWC.LineSeries, {')
+    h.append('    lineWidth: 2, lastValueVisible: true,')
+    h.append('    priceLineVisible: false, title: "JMA"')
     h.append('  });')
-    h.append('  chart.priceScale("vol").applyOptions({scaleMargins:{top:0.85,bottom:0}});')
-    h.append('  vs.setData(' + volumes_json + ');')
+    h.append('  jmaSeries.setData(jma_data);')
+    h.append('}')
 
-    # ST
-    if len(st_data) > 0:
-        h.append('  var stS = chart.addLineSeries({')
-        h.append('    color:"#787b86", lineWidth:1, lineStyle:2,')
-        h.append('    lastValueVisible:false, priceLineVisible:false, title:"ST"')
-        h.append('  });')
-        h.append('  stS.setData(' + st_json + ');')
-
-    # AEST
-    if len(aest_data) > 0:
-        h.append('  var aS = chart.addLineSeries({')
-        h.append('    lineWidth:3, lastValueVisible:true,')
-        h.append('    priceLineVisible:false, title:"AEST"')
-        h.append('  });')
-        h.append('  aS.setData(' + aest_json + ');')
-
-    # JMA
-    if len(jma_data) > 0:
-        h.append('  var jmaS = chart.addLineSeries({')
-        h.append('    lineWidth:2, lastValueVisible:true,')
-        h.append('    priceLineVisible:false, title:"JMA"')
-        h.append('  });')
-        h.append('  jmaS.setData(' + jma_json + ');')
-
-    # 마커 (AEST + JMA 통합)
-    if len(all_markers) > 0:
-        h.append('  cs.setMarkers(' + all_markers_json + ');')
-
-    # ── 틱강도 패널 ──
-    if has_tick and len(tick_int_data) > 0:
-        h.append('  // 틱강도 히스토그램')
-        h.append('  var tiS = chart.addHistogramSeries({')
-        h.append('    priceFormat:{type:"volume"}, priceScaleId:"tick_int"')
-        h.append('  });')
-        h.append('  chart.priceScale("tick_int").applyOptions({scaleMargins:{top:0.75,bottom:0}});')
-        h.append('  tiS.setData(' + tick_int_json + ');')
-
-        # 5이평
-        if len(tick_ma5_data) > 0:
-            h.append('  var tm5 = chart.addLineSeries({')
-            h.append('    color:"#ffeb3b", lineWidth:1, priceScaleId:"tick_int",')
-            h.append('    lastValueVisible:false, priceLineVisible:false, title:"TI5"')
-            h.append('  });')
-            h.append('  tm5.setData(' + tick_ma5_json + ');')
-
-        # 20이평
-        if len(tick_ma20_data) > 0:
-            h.append('  var tm20 = chart.addLineSeries({')
-            h.append('    color:"#2962ff", lineWidth:1, priceScaleId:"tick_int",')
-            h.append('    lastValueVisible:false, priceLineVisible:false, title:"TI20"')
-            h.append('  });')
-            h.append('  tm20.setData(' + tick_ma20_json + ');')
-
-    h.append('  chart.timeScale().fitContent();')
-    h.append('  window.addEventListener("resize", function(){')
-    h.append('    chart.applyOptions({width:container.clientWidth,height:container.clientHeight});')
+    # -- 레인지 히스토그램 (pane 0, priceScaleId: "range") --
+    h.append('if (range_data.length > 0) {')
+    h.append('  var rangeSeries = chart.addSeries(LWC.HistogramSeries, {')
+    h.append('    priceScaleId: "range",')
+    h.append('    lastValueVisible: false, priceLineVisible: false')
     h.append('  });')
+    h.append('  rangeSeries.setData(range_data);')
+    h.append('  chart.priceScale("range").applyOptions({')
+    h.append('    scaleMargins: { top: 0, bottom: 0 }, visible: false')
+    h.append('  });')
+    h.append('}')
 
-    h.append('} catch(e) {')
-    h.append('  var ed = document.getElementById("error");')
-    h.append('  ed.style.display="block";')
-    h.append('  ed.innerText="Chart Error: "+e.message;')
-    h.append('  console.error(e);')
+    # -- 마커 (v5: createSeriesMarkers) --
+    h.append('if (all_markers.length > 0) {')
+    h.append('  LWC.createSeriesMarkers(candleSeries, all_markers);')
+    h.append('}')
+
+    # -- 틱강도 (pane 1 — 별도 패널) --
+    h.append('if (tick_int_data.length > 0) {')
+    # 히스토그램 — pane index 1
+    h.append('  var tiSeries = chart.addSeries(LWC.HistogramSeries, {')
+    h.append('    lastValueVisible: false, priceLineVisible: false,')
+    h.append('    priceFormat: { type: "volume" },')
+    h.append('    title: "TI"')
+    h.append('  }, 1);')
+    h.append('  tiSeries.setData(tick_int_data);')
+    # MA5 라인 — pane index 1
+    h.append('  if (tick_ma5_data.length > 0) {')
+    h.append('    var ma5Series = chart.addSeries(LWC.LineSeries, {')
+    h.append('      color: "#ffeb3b", lineWidth: 1,')
+    h.append('      lastValueVisible: false, priceLineVisible: false, title: "MA5"')
+    h.append('    }, 1);')
+    h.append('    ma5Series.setData(tick_ma5_data);')
+    h.append('  }')
+    # MA20 라인 — pane index 1
+    h.append('  if (tick_ma20_data.length > 0) {')
+    h.append('    var ma20Series = chart.addSeries(LWC.LineSeries, {')
+    h.append('      color: "#ab47bc", lineWidth: 1,')
+    h.append('      lastValueVisible: false, priceLineVisible: false, title: "MA20"')
+    h.append('    }, 1);')
+    h.append('    ma20Series.setData(tick_ma20_data);')
+    h.append('  }')
+    # pane 1 높이 설정
+    h.append('  var panes = chart.panes();')
+    h.append('  if (panes.length > 1) { panes[1].setHeight(150); }')
+    h.append('}')
+
+    # -- 타임스케일 맞춤 --
+    h.append('chart.timeScale().fitContent();')
+
+    # -- 리사이즈 --
+    h.append('window.addEventListener("resize", function() {')
+    h.append('  chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });')
+    h.append('});')
+
+    h.append('} catch(err) {')
+    h.append('  var errEl = document.getElementById("error");')
+    h.append('  errEl.style.display = "block";')
+    h.append('  errEl.innerText = "Chart error: " + err.message;')
+    h.append('  console.error(err);')
     h.append('}')
 
     h.append('</script>')
