@@ -1,7 +1,8 @@
 """
-RiskFilterAgent — Layer 1 (DB 캔들 + 틱강도 기반 위험 필터)
+RiskFilterAgent — Layer 1 (DB 캔들 기반 위험 필터)
 
-9개 룰로 위험점수 0~100 산출 → BLOCK / CAUTION / PASS 판정
+8개 룰로 위험점수 0~100 산출 → BLOCK / CAUTION / PASS 판정
+목적: 폭락 종목(지뢰)을 사전에 제거
 """
 
 import sys, os
@@ -77,11 +78,6 @@ class RiskFilterAgent:
         if d.bearish_count >= self.th["bearish_count"]:
             self._add(rs, "bearish", 10,
                       f"5분봉음봉 {d.bearish_count}개 ≥ 4")
-
-        # 9) 틱강도 약세 (신규)
-        if d.tick_bearish:
-            self._add(rs, "tick_weak", 20,
-                      f"틱강도약세 MA5={d.tick_ma5_last:.0f} < MA20={d.tick_ma20_last:.0f}")
 
         # 판정
         rs.total = min(rs.total, 100)

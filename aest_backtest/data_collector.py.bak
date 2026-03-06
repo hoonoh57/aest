@@ -6,10 +6,6 @@ DataCollector — DB 캔들만 사용하여 RiskFilterAgent 입력 데이터 생
 - 30틱: aest_db.candle_tick30 (전일 14:00 ~ 당일 15:30)
 - 지표: core.py의 compute_tick_intensity, compute_aest,
         compute_supertrend, compute_jma_trend
-- 컬럼 매핑:
-    compute_aest       → aest_line, aest_trend, aest_is_range
-    compute_supertrend → st_line, st_trend
-    compute_jma_trend  → jma, jma_trend
 """
 
 import sys, os
@@ -66,13 +62,12 @@ class StockDayData:
     tick_bearish: bool = False         # MA5 < MA20 여부
 
     # AEST 지표
-    aest_value: float = 0.0           # 09:05 시점 aest_trend 값 (+1/-1)
-    aest_bullish: bool = False        # aest_trend > 0 여부
-    aest_line: float = 0.0            # 09:05 시점 aest_line 값
+    aest_value: float = 0.0           # 09:05 시점 AEST 값
+    aest_bullish: bool = False        # AEST > 0 여부
 
     # SuperTrend 지표
-    st_direction: int = 0             # st_trend: 1=상승, -1=하락, 0=미정
-    st_value: float = 0.0             # st_line 값
+    st_direction: int = 0             # 1=상승, -1=하락, 0=미정
+    st_value: float = 0.0            # SuperTrend 값
 
     # JMA 지표
     jma_value: float = 0.0           # 09:05 시점 JMA 값
@@ -221,48 +216,44 @@ class DataCollector:
         # ── 12. 기술적 지표 계산 (분봉 DataFrame 필요) ──
         if len(minutes_all) >= 10:
             df_minute = self._to_minute_df(minutes_all)
-            cutoff = f"{capture_date.strftime('%Y-%m-%d')} 09:05:00"
 
-            # 12-a. AEST  (컬럼: aest_line, aest_trend, aest_is_range)
+            # 12-a. AEST
             try:
                 df_aest = compute_aest(df_minute.copy())
-                if 'aest_trend' in df_aest.columns:
-                    early = df_aest[df_aest.index <= cutoff]['aest_trend'].dropna()
-                    if len(early) > 0:
-                        d.aest_value = round(float(early.iloc[-1]), 2)
+                if 'aest' in df_aest.columns:
+                    cutoff = f"{capture_date.strftime('%Y-%m-%d')} 09:05:00"
+                    early_aest = df_aest[df_aest.index <= cutoff]['aest'].dropna()
+                    if len(early_aest) > 0:
+                        d.aest_value = round(float(early_aest.iloc[-1]), 2)
                         d.aest_bullish = d.aest_value > 0
-                if 'aest_line' in df_aest.columns:
-                    early_line = df_aest[df_aest.index <= cutoff]['aest_line'].dropna()
-                    if len(early_line) > 0:
-                        d.aest_line = round(float(early_line.iloc[-1]), 2)
             except Exception as e:
                 print(f"    ⚠ AEST 계산 실패 {code}: {e}")
 
-            # 12-b. SuperTrend  (컬럼: st_line, st_trend)
+            # 12-b. SuperTrend
             try:
                 df_st = compute_supertrend(df_minute.copy())
-                if 'st_trend' in df_st.columns:
-                    early = df_st[df_st.index <= cutoff]['st_trend'].dropna()
-                    if len(early) > 0:
-                        d.st_direction = int(early.iloc[-1])
-                if 'st_line' in df_st.columns:
-                    early_line = df_st[df_st.index <= cutoff]['st_line'].dropna()
-                    if len(early_line) > 0:
-                        d.st_value = round(float(early_line.iloc[-1]), 2)
+                if 'st_dir' in df_st.columns:
+                    cutoff = f"{capture_date.strftime('%Y-%m-%d')} 09:05:00"
+                    early_st = df_st[df_st.index <= cutoff]['st_dir'].dropna()
+                    if len(early_st) > 0:
+                        d.st_direction = int(early_st.iloc[-1])
+                    early_stv = df_st[df_st.index <= cutoff]['supertrend'].dropna()
+                    if len(early_stv) > 0:
+                        d.st_value = round(float(early_stv.iloc[-1]), 2)
             except Exception as e:
                 print(f"    ⚠ SuperTrend 계산 실패 {code}: {e}")
 
-            # 12-c. JMA Trend  (컬럼: jma, jma_trend)
+            # 12-c. JMA Trend
             try:
                 df_jma = compute_jma_trend(df_minute.copy())
                 if 'jma' in df_jma.columns:
-                    early = df_jma[df_jma.index <= cutoff]['jma'].dropna()
-                    if len(early) > 0:
-                        d.jma_value = round(float(early.iloc[-1]), 2)
-                if 'jma_trend' in df_jma.columns:
-                    early_t = df_jma[df_jma.index <= cutoff]['jma_trend'].dropna()
-                    if len(early_t) > 0:
-                        d.jma_trend = int(early_t.iloc[-1])
+                    cutoff = f"{capture_date.strftime('%Y-%m-%d')} 09:05:00"
+                    early_jma = df_jma[df_jma.index <= cutoff]['jma'].dropna()
+                    if len(early_jma) > 0:
+                        d.jma_value = round(float(early_jma.iloc[-1]), 2)
+                    early_jt = df_jma[df_jma.index <= cutoff]['jma_trend'].dropna()
+                    if len(early_jt) > 0:
+                        d.jma_trend = int(early_jt.iloc[-1])
             except Exception as e:
                 print(f"    ⚠ JMA 계산 실패 {code}: {e}")
 
