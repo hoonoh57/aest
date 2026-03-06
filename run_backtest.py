@@ -2,11 +2,12 @@
 E:\2026\aest\run_backtest.py — CLI 진입점
 
 사용법:
-  python run_backtest.py --date 20260304                  # 내장 샘플
-  python run_backtest.py --date 20260304 --file data.txt  # 파일에서
-  python run_backtest.py --date 20260304 --clipboard      # 클립보드에서
-  python run_backtest.py --date 20260304 --reanalyze      # DB 재분석
-  python run_backtest.py --reanalyze-all                  # 전체 재분석
+  python run_backtest.py --date 20260304                          # 내장 샘플
+  python run_backtest.py --date 20260304 --file data.txt          # 파일에서
+  python run_backtest.py --date 20260304 --clipboard              # 클립보드에서
+  python run_backtest.py --date 20260304 --reanalyze              # DB 재분석 (NORMAL)
+  python run_backtest.py --date 20260305 --reanalyze --mode CRISIS  # CRISIS 모드
+  python run_backtest.py --reanalyze-all                          # 전체 재분석
 """
 
 import sys
@@ -42,6 +43,9 @@ def main():
                         help="DB 데이터만으로 재분석 (다운로드 없이)")
     parser.add_argument("--reanalyze-all", action="store_true",
                         help="저장된 모든 날짜 재분석")
+    parser.add_argument("--mode", type=str, default=None,
+                        choices=["NORMAL", "CRISIS", "OVERHEAT"],
+                        help="마켓 모드 (NORMAL/CRISIS/OVERHEAT)")
     args = parser.parse_args()
 
     runner = BacktestRunner()
@@ -58,6 +62,7 @@ def main():
         print("  python run_backtest.py --date 20260304 --file data.txt")
         print("  python run_backtest.py --date 20260304 --clipboard")
         print("  python run_backtest.py --date 20260304 --reanalyze")
+        print("  python run_backtest.py --date 20260305 --reanalyze --mode CRISIS")
         print("  python run_backtest.py --reanalyze-all")
         sys.exit(1)
 
@@ -65,7 +70,7 @@ def main():
 
     # ── 재분석 모드 ──
     if args.reanalyze:
-        runner.reanalyze(capture_date)
+        runner.reanalyze(capture_date, market_mode=args.mode)
         return
 
     # ── 텍스트 소스 결정 ──
@@ -84,7 +89,7 @@ def main():
         raw_text = SAMPLE_TEXT
 
     # ── 전체 파이프라인 ──
-    runner.run_full(raw_text, capture_date)
+    runner.run_full(raw_text, capture_date, market_mode=args.mode)
 
 
 if __name__ == "__main__":

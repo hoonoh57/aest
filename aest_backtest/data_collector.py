@@ -59,6 +59,10 @@ class StockDayData:
     bearish_count: int = 0         # 최근 연속 음봉 수
     avg_volume_5d: float = 0.0     # 5일 평균 거래량
 
+    # ── 신규 필드 (AND 필터용) ──
+    divergence_5d: float = 0.0     # 전일종가 vs 5일 최고종가 괴리율 (%)
+    est_5min_amount: float = 0.0   # 추정 5분 거래대금 (억 단위)
+
     # 틱강도 지표
     tick_intensity_avg: float = 0.0   # 09:00~09:05 평균 틱강도
     tick_ma5_last: float = 0.0        # 09:05 시점 틱강도 MA5
@@ -83,7 +87,6 @@ class DataCollector:
     def __init__(self, db: AestDB = None):
         self.db = db or AestDB()
 
-    # data_collector.py 의 _prev_business_day 교체
     def _prev_business_day(self, d: date) -> date:
         """일봉 데이터가 존재하는 가장 최근 과거 영업일 조회"""
         daily = self.db.get_daily('005930', d - timedelta(days=10), d)
@@ -96,8 +99,6 @@ class DataCollector:
         while prev.weekday() >= 5:
             prev -= timedelta(days=1)
         return prev
-
-
 
     # ── timedelta → 문자열 변환 헬퍼 ──
     def _tm_to_str(self, tm) -> str:
@@ -181,6 +182,24 @@ class DataCollector:
                 break
         d.bearish_count = count
 
+        # ── 6-a. 5일 고점 괴리율 (divergence_5d) ──
+        last5_closes = [int(r.get('close', 0)) for r in prev_days[-5:]]
+        if last5_closes and d.prev_close > 0:
+            best_close_5d = max(last5_closes)
+            if best_close_5d > 0:
+                d.divergence_5d = round(
+                    (d.prev_close - best_close_5d) / best_close_5d * 100, 2
+                )
+
+        # ── 6-b. 추정 5분 거래대금 (est_5min_amount, 억) ──
+        #    전일 거래대금 / 78 (6.5시간 = 78개 5분봉) → 억 단위
+        #    거래대금 = close × volume (일봉에 amount 컬럼이 없는 경우)
+        prev_amount = prev.get('amount', None)
+        if prev_amount is None or prev_amount == 0:
+            prev_amount = d.prev_close * d.prev_volume
+        if prev_amount > 0:
+            d.est_5min_amount = round(prev_amount / 78 / 1e8, 1)
+
         # ── 7. 워밍업 포함 분봉 조회 (5영업일) ──
         warmup_start = capture_date - timedelta(days=10)
         all_dates = set()
@@ -188,7 +207,7 @@ class DataCollector:
             if warmup_start <= r['dt'] <= capture_date:
                 all_dates.add(r['dt'])
         all_dates.add(capture_date)
-        
+
         minutes_all = []
         minutes_today = []
         for dt in sorted(all_dates):
@@ -204,7 +223,6 @@ class DataCollector:
             rows = self.db.get_tick30(code, dt)
             if rows:
                 tick30_all.extend(rows)
-
 
         # ── 9. 당일 09:00~09:05 분봉으로 기본 지표 계산 ──
         early_minutes = [
@@ -247,7 +265,7 @@ class DataCollector:
             df_minute = self._to_minute_df(minutes_all)
             cutoff = f"{capture_date.strftime('%Y-%m-%d')} 09:05:00"
 
-            # 12-a. AEST  (컬럼: aest_line, aest_trend, aest_is_range)
+            # 12-a. AEST
             try:
                 df_aest = compute_aest(df_minute.copy())
                 if 'aest_trend' in df_aest.columns:
@@ -262,7 +280,7 @@ class DataCollector:
             except Exception as e:
                 print(f"    ⚠ AEST 계산 실패 {code}: {e}")
 
-            # 12-b. SuperTrend  (컬럼: st_line, st_trend)
+            # 12-b. SuperTrend
             try:
                 df_st = compute_supertrend(df_minute.copy())
                 if 'st_trend' in df_st.columns:
@@ -276,7 +294,7 @@ class DataCollector:
             except Exception as e:
                 print(f"    ⚠ SuperTrend 계산 실패 {code}: {e}")
 
-            # 12-c. JMA Trend  (컬럼: jma, jma_trend)
+            # 12-c. JMA Trend
             try:
                 df_jma = compute_jma_trend(df_minute.copy())
                 if 'jma' in df_jma.columns:

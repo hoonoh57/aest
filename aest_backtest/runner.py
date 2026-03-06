@@ -1,5 +1,5 @@
 """
-BacktestRunner — 전체 파이프라인 오케스트레이션
+BacktestRunner — 전체 파이프라인 실행
 
 STEP 1: 클립보드 텍스트 → caught_stocks 저장
 STEP 2: 포착 종목 분봉/30틱 다운로드 → aest_db 캐시
@@ -28,7 +28,7 @@ class BacktestRunner:
         self.collector = DataCollector(self.db)
         self.agent = RiskFilterAgent()
 
-    # ══════════ STEP 1: 클립보드 → DB ══════════
+    # ═════════════════ STEP 1: 클립보드 → DB ═════════════════
 
     def import_clipboard(self, raw_text: str, capture_date: date) -> int:
         parser = ClipboardParser()
@@ -37,7 +37,7 @@ class BacktestRunner:
         for p in parsed:
             info = self.db.find_code_by_name(p["name"])
             if not info:
-                print(f"  ⚠ '{p['name']}' 코드 미발견")
+                print(f"  ⚠ '{p['name']}' 코드 미검색")
                 continue
             rows.append({
                 "capture_date": capture_date,
@@ -54,7 +54,7 @@ class BacktestRunner:
         print(f"  ✅ {len(rows)}건 caught_stocks 저장")
         return len(rows)
 
-    # ══════════ STEP 2: 캔들 다운로드 ══════════
+    # ═════════════════ STEP 2: 캔들 다운로드 ═════════════════
 
     def download_candles(self, capture_date: date):
         caught = self.db.get_caught(capture_date)
@@ -65,16 +65,26 @@ class BacktestRunner:
         print(f"\n  캔들 다운로드: {capture_date} / {len(codes)}종목")
         self.downloader.download_batch(codes, capture_date)
 
-    # ══════════ STEP 3: 에이전트 판정 ══════════
+    # ═════════════════ STEP 3: 에이전트 판정 ═════════════════
 
-    def run_agent(self, capture_date: date):
+    def run_agent(self, capture_date: date, market_mode: str = None):
+        """
+        Parameters
+        ----------
+        capture_date : date
+        market_mode : str or None
+            "CRISIS" | "NORMAL" | "OVERHEAT" | None (기본=NORMAL)
+        """
+        if market_mode:
+            self.agent.set_market_mode(market_mode)
+
         caught = self.db.get_caught(capture_date)
         if not caught:
             print("  ⚠ 포착 종목 없음")
             return
 
-        print(f"\n  RiskFilterAgent 판정: {capture_date}")
-        print(f"  {'─'*55}")
+        print(f"\n  RiskFilterAgent 판정: {capture_date}  [마켓모드: {self.agent.market_mode}]")
+        print(f"  {'─'*65}")
 
         for c in caught:
             code, name = c["code"], c["name"]
@@ -91,33 +101,46 @@ class BacktestRunner:
             label = self._classify(max_ret, close_ret)
             correct = self._check(risk.verdict, label)
 
-            # DB 저장
+            # ── evidence를 직렬화 가능한 형태로 변환 ──
+            evidence_serializable = [
+                {"key": key, "ok": ok, "reason": reason}
+                for key, ok, reason in risk.evidence
+            ]
+
+            # ── 개별 필터 통과 여부를 score 컬럼에 매핑 ──
             self.db.upsert_verdict({
                 "capture_date": capture_date,
                 "code": code,
-                "risk_score": risk.total,
+                "risk_score": risk.total_fails,
                 "verdict": risk.verdict,
-                "score_volume": risk.scores.get("volume", 0),
-                "score_gap": risk.scores.get("gap", 0),
-                "score_early": risk.scores.get("early_move", 0),
-                "score_cap": risk.scores.get("market_cap", 0),
-                "score_wick": risk.scores.get("wick", 0),
-                "score_volratio": risk.scores.get("vol_ratio", 0),
-                "score_closepos": risk.scores.get("close_pos", 0),
-                "score_bearish": risk.scores.get("bearish", 0),
-                "evidence": json.dumps(risk.evidence, ensure_ascii=False),
+                "score_volume": 0 if risk.passed.get("F2_liquidity", True) else 1,
+                "score_gap": 0 if risk.passed.get("F1_gap", True) else 1,
+                "score_early": 0,
+                "score_cap": 0,
+                "score_wick": 0 if risk.passed.get("F3_wick", True) else 1,
+                "score_volratio": 0 if risk.passed.get("F7_overheat", True) else 1,
+                "score_closepos": 0 if risk.passed.get("F5_cpos", True) else 1,
+                "score_bearish": 0 if risk.passed.get("F4_bearish", True) else 1,
+                "evidence": json.dumps(evidence_serializable, ensure_ascii=False),
             })
             self.db.update_verdict_actual(
                 capture_date, code, max_ret, close_ret, label, correct
             )
 
             mark = "✅" if correct else "❌"
-            print(f"  {mark} {name:10s} 위험={risk.total:3d} [{risk.verdict:7s}] "
-                  f"실제={label:7s} (최고={max_ret}% 7h={close_ret}%)")
-            for key, score, reason in risk.evidence:
-                print(f"     └ +{score:2d}  {reason}")
+            active = 7 - len(risk.skipped)
+            print(f"  {mark} {name:10s} 실패={risk.total_fails}/{active} [{risk.verdict:7s}] "
+                  f"실제={label:7s} (최고={max_ret}% 7h={close_ret}%) [{risk.market_mode}]")
+            for key, ok, reason in risk.evidence:
+                if key in risk.skipped and not ok:
+                    flag = "○"   # 해제됨 (실패했지만 카운트 안 함)
+                elif ok:
+                    flag = "✓"
+                else:
+                    flag = "✗"
+                print(f"     {flag} {reason}")
 
-    # ══════════ STEP 4: KPI 집계 ══════════
+    # ═════════════════ STEP 4: KPI 집계 ═════════════════
 
     def compute_kpi(self, capture_date: date):
         verdicts = self.db.get_verdicts(capture_date)
@@ -172,13 +195,13 @@ class BacktestRunner:
             "pass_safety": pass_safety,
             "pass_winner_rate": pass_win,
             "mine_block_rate": mine_block,
-            "thresholds_ver": "v1",
+            "thresholds_ver": f"v2-AND-{self.agent.market_mode}",
         }
         self.db.upsert_kpi(kpi)
 
         # 출력
         print(f"\n  {'═'*55}")
-        print(f"  일일 KPI: {capture_date}")
+        print(f"  일일 KPI: {capture_date}  [마켓모드: {self.agent.market_mode}]")
         print(f"  {'═'*55}")
         print(f"  포착={total}  PASS={len(pass_list)}  "
               f"BLOCK={len(block_list)}  CAUTION={len(caution_list)}")
@@ -186,35 +209,35 @@ class BacktestRunner:
               f"LOSER={kpi['loser_count']}  TRAP={kpi['trap_count']}")
         print(f"  {'─'*55}")
         if block_acc is not None:
-            print(f"  BLOCK 정확도  = {block_acc:5.1f}%  "
+            print(f"  BLOCK 정확도 = {block_acc:5.1f}%  "
                   f"({len(block_mines)}/{len(block_list)})")
         if pass_safety is not None:
-            print(f"  PASS 안전율   = {100 - pass_safety:5.1f}%  "
+            print(f"  PASS 안전율  = {100 - pass_safety:5.1f}%  "
                   f"(지뢰 {len(pass_mines)}/{len(pass_list)})")
         if pass_win is not None:
-            print(f"  PASS 승률     = {pass_win:5.1f}%  "
+            print(f"  PASS 승률    = {pass_win:5.1f}%  "
                   f"({len(pass_winners)}/{len(pass_list)})")
-        print(f"  지뢰 차단율   = {mine_block:5.1f}%  "
+        print(f"  지뢰 차단율  = {mine_block:5.1f}%  "
               f"({len(blocked)}/{len(all_mines)})")
         print(f"  {'═'*55}")
 
-    # ══════════ ALL-IN-ONE ══════════
+    # ═════════════════ ALL-IN-ONE ═════════════════
 
-    def run_full(self, raw_text: str, capture_date: date):
+    def run_full(self, raw_text: str, capture_date: date, market_mode: str = None):
         print(f"\n{'#'*60}")
         print(f"  BacktestRunner: {capture_date}")
         print(f"{'#'*60}")
 
         self.import_clipboard(raw_text, capture_date)
         self.download_candles(capture_date)
-        self.run_agent(capture_date)
+        self.run_agent(capture_date, market_mode=market_mode)
         self.compute_kpi(capture_date)
 
-    # ══════════ 재분석 (다운로드 없이) ══════════
+    # ═════════════════ 재분석 (다운로드 없이) ═════════════════
 
-    def reanalyze(self, capture_date: date):
-        print(f"\n  ♻ 재분석: {capture_date}")
-        self.run_agent(capture_date)
+    def reanalyze(self, capture_date: date, market_mode: str = None):
+        print(f"\n  ♻ 재분석: {capture_date}  [마켓모드: {market_mode or 'NORMAL'}]")
+        self.run_agent(capture_date, market_mode=market_mode)
         self.compute_kpi(capture_date)
 
     def reanalyze_all(self):
@@ -223,7 +246,7 @@ class BacktestRunner:
         for d in dates:
             self.reanalyze(d)
 
-    # ══════════ 내부 유틸 ══════════
+    # ═════════════════ 내부 유틸 ═════════════════
 
     def _classify(self, max_ret, close_ret) -> str:
         if max_ret is None:

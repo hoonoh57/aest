@@ -38,21 +38,29 @@ AEST_DB = {
     "charset": "utf8mb4",
 }
 
-# ── RiskFilterAgent 임계값 ──
+# ── RiskFilterAgent 임계값 (AND 필터 방식) ──
 THRESHOLDS = {
-    "vol_5min_danger": 1_0000_0000,
-    "vol_5min_warning": 3_0000_0000,
-    "gap_huge": 10.0,
-    "gap_large": 7.0,
-    "early_move_danger": 8.0,
-    "early_move_warning": 5.0,
-    "tiny_cap": 500_0000_0000,
-    "wick_ratio_danger": 0.5,
-    "vol_ratio_spike": 5.0,
-    "close_pos_low": 0.2,
-    "bearish_count": 4,
-    "block_threshold": 40,
-    "caution_threshold": 25,
+    # F1: 갭 상한 (%)
+    "gap_max": 10.0,
+
+    # F2: 최소 5분 거래대금 (억)
+    "min_amount_5min": 10.0,
+
+    # F3: 전일 윗꼬리비 상한
+    "max_wick": 0.5,
+
+    # F4: 연속음봉 상한 (일)
+    "max_bearish": 3,
+
+    # F5: 전일 종가위치 범위
+    "cpos_low": 0.3,
+    "cpos_high": 0.8,
+
+    # F6: 5일 고점 괴리율 하한 (%)
+    "min_div_5d": -8.0,
+
+    # F7: 과열 거래대금 상한 (억)
+    "max_amount_5min": 300.0,
 }
 
 # ── 성과 분류 기준 ──
